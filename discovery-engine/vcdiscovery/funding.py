@@ -73,7 +73,7 @@ def record_round(
     ]
     for rnd in candidates:
         agree = _amounts_agree(rnd.amount, amount)
-        if agree is False:
+        if agree is not True:
             continue
         publishers = list(rnd.publishers or [])
         unconfirmed = {"rumor", "target"}
