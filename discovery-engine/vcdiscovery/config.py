@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     # Optional shared secret. When set, every write request needs the header `X-API-Key`.
     # Required to enable write endpoints; without it, writes fail closed.
+    # Required for all write API routes; an empty value disables writes.
     api_token: str = ""
 
     enable_scheduler: bool = False
