@@ -67,7 +67,7 @@ def record_round(
     candidates = [
         r for r in startup.rounds
         if r.evidence_status != "regulatory_filing" and evidence_status != "regulatory_filing"
-        and (r.announced_date is None or window_lo <= r.announced_date <= window_hi)
+        and r.announced_date is not None and window_lo <= r.announced_date <= window_hi
         and (r.round_type is None or round_type is None or r.round_type == round_type)
         and (r.currency is None or currency is None or r.currency == currency)
     ]
