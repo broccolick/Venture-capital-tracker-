@@ -16,7 +16,7 @@ TRACKER_JSON = REPO_ROOT / "vc-investment-tracker-web" / "examples" / "original-
 
 
 def client_for(settings):
-    return TestClient(create_app(settings))
+    return TestClient(create_app(settings), headers={"X-API-Key": settings.api_token} if settings.api_token else {})
 
 
 def test_core_endpoints(settings):
