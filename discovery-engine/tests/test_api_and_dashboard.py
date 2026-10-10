@@ -73,6 +73,14 @@ def test_run_discovery_endpoint_starts_background_job(settings, monkeypatch):
     assert r.status_code == 202 and calls[0]["groups"] == ["funding"]
 
 
+def test_csv_export_neutralizes_formula_strings(settings):
+    from vcdiscovery.csv_io import _write
+
+    output = _write([{"name": "=HYPERLINK(\"https://bad.example\")", "amount": -120}], ["name", "amount"])
+    assert "'=HYPERLINK" in output
+    assert ",-120" in output  # legitimate numeric values remain numeric
+
+
 def test_tracker_import_is_idempotent(settings):
     with db.session_scope() as s:
         assert import_tracker_snapshot(s, TRACKER_JSON)["created"] == 20
