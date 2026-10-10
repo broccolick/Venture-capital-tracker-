@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     # Optional shared secret. When set, every write request needs the header `X-API-Key`.
     # Required to enable write endpoints; without it, writes fail closed.
     # Required for all write API routes; an empty value disables writes.
+    # Required for all write API routes; an empty value disables writes.
     api_token: str = ""
 
     enable_scheduler: bool = False
