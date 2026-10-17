@@ -482,6 +482,40 @@ def test_same_url_correction_withdraws_stale_latest_funding_summary(settings):
         assert all(not rnd.is_current for rnd in startup.rounds)
 
 
+def test_same_url_summary_revision_is_reprocessed_even_if_title_matches_another_article(settings):
+    url = "https://outlet-a.example/funding"
+    title = "Acme Robotics raises funding"
+    ingest(settings, [news(title, url, publisher="Outlet A", summary="Acme Robotics raises a Series A round")])
+
+    with db.session_scope() as s:
+        article = s.scalar(select(NewsArticle).where(NewsArticle.url == url))
+        assert article is not None
+        # Simulate a legacy non-duplicate article with the same title fingerprint; source
+        # correction must not be discarded as syndicated merely because the title is unchanged.
+        mirror = NewsArticle(
+            source_key="legacy-mirror", source_type="news", publisher="Outlet B",
+            url="https://outlet-b.example/funding", title=title, summary="Legacy copy",
+            published_at=article.published_at, title_fingerprint=article.title_fingerprint,
+            duplicate_of_id=None,
+        )
+        s.add(mirror)
+
+    ingest(settings, [news(title, url, publisher="Outlet A", summary="Acme Robotics opens a Seed round")])
+
+    with db.session_scope() as s:
+        article = s.scalar(select(NewsArticle).where(NewsArticle.url == url))
+        assert article.duplicate_of_id is None
+        observations = list(s.scalars(select(SourceObservation).where(
+            SourceObservation.article_id == article.id
+        ).order_by(SourceObservation.revision_number)))
+        assert len(observations) == 2
+        active_rounds = list(s.scalars(select(FundingRound).where(FundingRound.is_current.is_(True))))
+        assert len(active_rounds) == 1
+        assert active_rounds[0].round_type == "Seed"
+        history = (active_rounds[0].extra or {}).get("funding_observations") or []
+        assert [o.get("is_current", True) for o in history] == [False, True]
+
+
 def test_same_url_unchanged_fetch_does_not_create_a_revision_or_new_evidence(settings):
     url = "https://a.example/unchanged"
     item = news("Acme Robotics raises $12M Series A", url, publisher="Outlet A")

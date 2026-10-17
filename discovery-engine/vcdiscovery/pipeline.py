@@ -209,6 +209,7 @@ def ingest_news_item(session: Session, item: NewsItem, settings: Settings, match
         item.origin_group, item.source_role,
     )
     article = session.scalar(select(NewsArticle).where(NewsArticle.url == url))
+    is_revision = False
     if article:
         previous = _latest_source_observation(session, article.id)
         if previous is None:
@@ -229,8 +230,9 @@ def ingest_news_item(session: Session, item: NewsItem, settings: Settings, match
             stats["duplicate"] = 1
             return stats
 
+        is_revision = True
         revision_observation = _record_source_observation(
-            session, article, source_key=item.source_key, source_type=item.source_type, publisher=item.publisher,
+            session, article, source_key=item.source_key, source_type=item.source_type,
             source_url=url, title=item.title, summary=item.summary, published_at=item.published_at,
             retrieved_at=now, fingerprint=fingerprint, revision_number=previous.revision_number + 1,
             origin_group=item.origin_group, source_role=item.source_role,
@@ -293,10 +295,15 @@ def ingest_news_item(session: Session, item: NewsItem, settings: Settings, match
 
     fp = title_fingerprint(item.title)
     when = item.published_at or now
-    syndicated = session.scalar(select(NewsArticle).where(
-        NewsArticle.url != url, NewsArticle.title_fingerprint == fp, NewsArticle.duplicate_of_id.is_(None),
-        NewsArticle.published_at.between(when - SYNDICATION_WINDOW, when + SYNDICATION_WINDOW),
-    ))
+    # A known URL with changed captured metadata is a revision. Reprocess it even when
+    # another article has the same title fingerprint; otherwise a corrected summary can vanish
+    # behind the syndication shortcut.
+    syndicated = None
+    if not is_revision:
+        syndicated = session.scalar(select(NewsArticle).where(
+            NewsArticle.url != url, NewsArticle.title_fingerprint == fp, NewsArticle.duplicate_of_id.is_(None),
+            NewsArticle.published_at.between(when - SYNDICATION_WINDOW, when + SYNDICATION_WINDOW),
+        ))
     if syndicated:
         article.duplicate_of_id = syndicated.id
         for mention in syndicated.mentions:
