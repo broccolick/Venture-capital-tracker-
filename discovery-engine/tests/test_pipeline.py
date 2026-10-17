@@ -19,7 +19,7 @@ from vcdiscovery.models import (
     SecFiling,
     Startup,
 )
-from vcdiscovery.pipeline import acquire_lock, ingest_items, run_discovery
+from vcdiscovery.pipeline import _apply_filing, acquire_lock, ingest_items, run_discovery
 from vcdiscovery.sources.base import NewsItem
 from vcdiscovery.sources.hackernews import HackerNewsSource
 from vcdiscovery.sources.rss import RSSSource
@@ -32,9 +32,10 @@ def rss(key="example_news", publisher="Example News", url=FEED_URL):
     return RSSSource(key=key, name=publisher, url=url, publisher=publisher, group="funding")
 
 
-def news(title, url, publisher="Other Outlet", when=datetime(2026, 10, 2, 9), source_type="news", summary=None):
+def news(title, url, publisher="Other Outlet", when=datetime(2026, 10, 2, 9), source_type="news",
+         summary=None, origin_group=None, source_role=None):
     return NewsItem(source_key="manual", source_type=source_type, publisher=publisher, url=url, title=title,
-                    summary=summary, published_at=when)
+                    summary=summary, published_at=when, origin_group=origin_group, source_role=source_role)
 
 
 def ingest(settings, items):
@@ -87,20 +88,35 @@ def test_rss_discovery_extracts_companies_and_is_idempotent(settings):
 
 
 def test_corroboration_confirms_and_conflict_is_flagged(settings):
-    ingest(settings, [news("Acme Robotics raises $12M Series A", "https://a.example/1", publisher="Outlet A")])
-    ingest(settings, [news("Acme Robotics lands $12 million Series A to scale robots", "https://b.example/1", publisher="Outlet B")])
+    ingest(settings, [news("Acme Robotics raises $12M Series A", "https://a.example/1", publisher="Outlet A",
+                           origin_group="outlet-a", source_role="independent_reporter")])
+    ingest(settings, [news("Acme Robotics lands $12 million Series A to scale robots", "https://b.example/1",
+                           publisher="Outlet B", origin_group="outlet-b", source_role="independent_reporter")])
     with db.session_scope() as s:
         rounds = s.scalars(select(FundingRound)).all()
         assert len(rounds) == 1
         assert rounds[0].evidence_status == "confirmed"
         assert rounds[0].publishers == ["Outlet A", "Outlet B"]
-    ingest(settings, [news("Acme Robotics raises $20M Series A", "https://c.example/1", publisher="Outlet C")])
+    ingest(settings, [news("Acme Robotics raises $20M Series A", "https://c.example/1", publisher="Outlet C",
+                           origin_group="outlet-c", source_role="independent_reporter")])
     with db.session_scope() as s:
         rounds = s.scalars(select(FundingRound).order_by(FundingRound.id)).all()
         assert len(rounds) == 2 and all(r.conflict for r in rounds)
         acme = s.scalar(select(Startup))
         assert "conflicting_funding" in acme.flags
         assert any(c["component"] == "conflicts" for c in acme.confidence_breakdown["components"])
+
+
+def test_different_publisher_labels_without_known_origins_do_not_confirm(settings):
+    ingest(settings, [news("Atlas Robotics raises $7M Seed", "https://unknown-a.example/1", publisher="Outlet A")])
+    ingest(settings, [news("Atlas Robotics secures $7 million seed round", "https://unknown-b.example/1", publisher="Outlet B")])
+    with db.session_scope() as s:
+        round_row = s.scalar(select(FundingRound))
+        assert round_row.evidence_status == "reported"
+        observations = (round_row.extra or {}).get("funding_observations") or []
+        assert len(observations) == 2
+        assert all(o.get("origin_group") is None for o in observations)
+        assert all(o.get("independent_source") is False for o in observations)
 
 
 def test_missing_funding_date_is_not_imputed_or_merged(settings):
@@ -260,6 +276,46 @@ def test_sec_ingestion_matches_news_company_and_ignores_funds(settings):
     assert not [c for c in calls if c.endswith("primary_doc.xml")]
 
 
+def test_form_d_amendment_preserves_previous_funding_observation(settings):
+    with db.session_scope() as s:
+        startup = Startup(name="Form D Co", normalized_name="form d co",
+                          review_status="Needs Verification", flags=[], is_demo=False)
+        old_filing = SecFiling(
+            accession_number="0001999001-26-000010", cik="1999001", form_type="D",
+            is_amendment=False, issuer_name="FORM D CO, INC.", normalized_name="form d co inc",
+            filing_date=date(2026, 9, 1), filing_url="https://www.sec.gov/Archives/old/index.htm",
+            total_offering_amount=200_000, total_amount_sold=100_000,
+        )
+        new_filing = SecFiling(
+            accession_number="0001999001-26-000011", cik="1999001", form_type="D/A",
+            is_amendment=True, issuer_name="FORM D CO, INC.", normalized_name="form d co inc",
+            filing_date=date(2026, 10, 1), filing_url="https://www.sec.gov/Archives/new/index.htm",
+            total_offering_amount=250_000, total_amount_sold=150_000,
+        )
+        s.add_all([startup, old_filing, new_filing])
+        s.flush()
+        rnd = FundingRound(
+            startup_id=startup.id, round_type=None, amount=100_000, currency="USD",
+            amount_text="Form D: $100,000 sold", announced_date=date(2026, 9, 1),
+            evidence_status="regulatory_filing", source_url=old_filing.filing_url,
+            sec_filing_id=old_filing.id, publishers=["SEC EDGAR"],
+        )
+        s.add(rnd)
+        s.flush()
+        round_id = rnd.id
+        _apply_filing(s, startup, new_filing, [])
+
+        updated = s.get(FundingRound, round_id)
+        assert updated.amount == 150_000 and updated.sec_filing_id == new_filing.id
+        observations = (updated.extra or {})["funding_observations"]
+        old_observation = next(o for o in observations if o.get("sec_filing_id") == old_filing.id)
+        new_observation = next(o for o in observations if o.get("sec_filing_id") == new_filing.id)
+        assert old_observation["amount"] == 100_000 and old_observation["is_current"] is False
+        assert new_observation["amount"] == 150_000 and new_observation["is_current"] is True
+        assert new_observation["source_role"] == "regulator"
+        assert s.get(SecFiling, old_filing.id) is not None  # earlier filing record remains available
+
+
 def test_sec_creates_startup_for_unknown_candidate(settings):
     run_discovery(settings, sources=[SecFormDSource(lookback_days=1, today=lambda: date(2026, 10, 8))],
                   client=make_client(sec_routes()))
@@ -323,6 +379,48 @@ def test_same_url_revision_preserves_old_observation_and_reassesses_citations(se
         assert [c.is_current for c in citations] == [False, True]
         assert [c.source_observation_id for c in citations] == [observations[0].id, observations[1].id]
         assert "$20M" in citations[1].value_text
+        rounds = list(s.scalars(select(FundingRound)))
+        current_rounds = [r for r in rounds if r.is_current]
+        assert len(current_rounds) == 1 and current_rounds[0].amount == 20e6
+        history = (current_rounds[0].extra or {})["funding_observations"]
+        assert [o["amount"] for o in history] == [12e6, 20e6]
+        assert [o["is_current"] for o in history] == [False, True]
+        assert s.get(Startup, current_rounds[0].startup_id).total_funding_amount == 20e6
+
+
+def test_source_revision_conflicts_with_another_current_source(settings):
+    url_a = "https://outlet-a.example/acme-round"
+    ingest(settings, [news("Acme Robotics raises $12M Series A", url_a, publisher="Outlet A",
+                           origin_group="outlet-a", source_role="independent_reporter")])
+    ingest(settings, [news("Acme Robotics secures $12 million Series A with new investors",
+                           "https://outlet-b.example/acme-round", publisher="Outlet B",
+                           origin_group="outlet-b", source_role="independent_reporter")])
+    with db.session_scope() as s:
+        assert len(s.scalars(select(FundingRound)).all()) == 1
+        original = s.scalar(select(FundingRound))
+        assert original.evidence_status == "confirmed"
+        original_id = original.id
+
+    ingest(settings, [news("Acme Robotics raises $20M Series A", url_a, publisher="Outlet A",
+                           origin_group="outlet-a", source_role="independent_reporter")])
+
+    with db.session_scope() as s:
+        rounds = list(s.scalars(select(FundingRound).order_by(FundingRound.id)))
+        assert len(rounds) == 2
+        original = s.get(FundingRound, original_id)
+        revised = next(r for r in rounds if r.id != original_id)
+        assert original.is_current and revised.is_current
+        assert original.conflict and revised.conflict
+        original_obs = (original.extra or {})["funding_observations"]
+        prior_a = next(o for o in original_obs if o.get("article_id") is not None
+                       and o.get("source_url") == url_a)
+        assert prior_a["is_current"] is False
+        assert any(o.get("publisher") == "Outlet B" and o.get("is_current", True) for o in original_obs)
+        current_revision = next(o for o in (revised.extra or {})["funding_observations"] if o.get("is_current", True))
+        assert current_revision["amount"] == 20e6
+        assert current_revision["independent_source"] is False
+        startup = s.scalar(select(Startup).where(Startup.name == "Acme Robotics"))
+        assert startup.total_funding_amount is None
 
 
 def test_same_url_unchanged_fetch_does_not_create_a_revision_or_new_evidence(settings):
