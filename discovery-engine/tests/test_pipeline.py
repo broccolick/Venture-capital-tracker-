@@ -316,6 +316,43 @@ def test_form_d_amendment_preserves_previous_funding_observation(settings):
         assert s.get(SecFiling, old_filing.id) is not None  # earlier filing record remains available
 
 
+def test_form_d_amendment_is_not_linked_arbitrarily_when_multiple_rounds_exist(settings):
+    with db.session_scope() as s:
+        startup = Startup(name="Multi Offering Co", normalized_name="multi offering co",
+                          review_status="Needs Verification", flags=[], is_demo=False)
+        filing = SecFiling(
+            accession_number="0001999001-26-000021", cik="1999001", form_type="D/A",
+            is_amendment=True, issuer_name="MULTI OFFERING CO, INC.", normalized_name="multi offering co inc",
+            filing_date=date(2026, 10, 3), filing_url="https://www.sec.gov/Archives/new-amendment/index.htm",
+            total_offering_amount=300_000, total_amount_sold=175_000,
+        )
+        s.add_all([startup, filing])
+        s.flush()
+        older = FundingRound(
+            startup_id=startup.id, amount=100_000, currency="USD", amount_text="Form D: $100,000 sold",
+            announced_date=date(2026, 8, 1), evidence_status="regulatory_filing",
+            source_url="https://www.sec.gov/Archives/old1/index.htm", publishers=["SEC EDGAR"],
+        )
+        newer = FundingRound(
+            startup_id=startup.id, amount=125_000, currency="USD", amount_text="Form D: $125,000 sold",
+            announced_date=date(2026, 9, 1), evidence_status="regulatory_filing",
+            source_url="https://www.sec.gov/Archives/old2/index.htm", publishers=["SEC EDGAR"],
+        )
+        s.add_all([older, newer])
+        s.flush()
+        older_id, newer_id = older.id, newer.id
+
+        _apply_filing(s, startup, filing, [])
+
+        older_after, newer_after = s.get(FundingRound, older_id), s.get(FundingRound, newer_id)
+        assert older_after.amount == 100_000 and older_after.is_current
+        assert newer_after.amount == 125_000 and newer_after.is_current
+        new_round = s.scalar(select(FundingRound).where(FundingRound.sec_filing_id == filing.id))
+        assert new_round is not None and new_round.amount == 175_000 and new_round.is_current
+        assert new_round.extra["funding_resolution"]["state"] == "needs_review"
+        assert set(new_round.extra["amendment_candidate_round_ids"]) == {older_id, newer_id}
+
+
 def test_sec_creates_startup_for_unknown_candidate(settings):
     run_discovery(settings, sources=[SecFormDSource(lookback_days=1, today=lambda: date(2026, 10, 8))],
                   client=make_client(sec_routes()))

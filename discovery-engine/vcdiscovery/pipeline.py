@@ -585,15 +585,20 @@ def _apply_filing(session: Session, startup: Startup, filing: SecFiling, executi
     offered = "Indefinite" if filing.offering_amount_indefinite else (
         f"${filing.total_offering_amount:,.0f}" if filing.total_offering_amount is not None else "not stated")
     summary = f"Form {filing.form_type}: ${sold or 0:,.0f} sold of {offered} offered"
+    amendment_candidate_ids: list[int] = []
 
     if sold is not None:
         existing = None
         if filing.is_amendment:
-            existing = session.scalar(select(FundingRound).where(
+            candidates = list(session.scalars(select(FundingRound).where(
                 FundingRound.startup_id == startup.id,
                 FundingRound.evidence_status == "regulatory_filing",
                 FundingRound.is_current.is_(True),
-            ).order_by(FundingRound.announced_date.desc()))
+            ).order_by(FundingRound.announced_date.desc())))
+            if len(candidates) == 1:
+                existing = candidates[0]
+            else:
+                amendment_candidate_ids = [row.id for row in candidates if row.id is not None]
         if existing:
             previous_filing_id = existing.sec_filing_id
             extra = dict(existing.extra or {})
@@ -642,13 +647,26 @@ def _apply_filing(session: Session, startup: Startup, filing: SecFiling, executi
             existing.is_current = True
             existing.superseded_by_round_id = None
         else:
-            record_round(
+            new_round, _ = record_round(
                 session, startup, round_type=None, amount=sold, currency="USD", amount_text=summary,
                 announced=filed, evidence_status="regulatory_filing", publisher="SEC EDGAR",
                 source_url=filing.filing_url, sec_filing_id=filing.id,
                 announced_date_basis="filing_date", source_published_at=filed.isoformat() if filed else None,
                 origin_group="sec-edgar", source_role="regulator",
             )
+            if filing.is_amendment:
+                reason = (
+                    "Form D/A amendment could not be linked to exactly one current regulatory funding record; "
+                    "the filing was preserved separately for review rather than overwriting a possibly unrelated offering."
+                )
+                new_round.notes = ((new_round.notes + "; ") if new_round.notes else "") + reason
+                extra = dict(new_round.extra or {})
+                extra["funding_resolution"] = {
+                    "state": "needs_review", "reason": reason,
+                    "candidate_round_ids": amendment_candidate_ids, "rule_version": 2,
+                }
+                extra["amendment_candidate_round_ids"] = amendment_candidate_ids
+                new_round.extra = extra
 
     _add_signal(session, startup, "regulatory_filing", f"formd:{filing.accession_number}", source_key="sec_form_d",
                 detail=summary, url=filing.filing_url, observed_at=published_at, filing=filing)
