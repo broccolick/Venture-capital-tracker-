@@ -910,7 +910,7 @@ function fundingLine(c) {
 }
 function discoveredProfile(c) {
   const sc=c.score;
-  const link=(u,t)=>u?`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(t)}</a>`:esc(t);
+  const link=(u,t)=>{const safe=VS.safeURL(u||"");return safe?`<a href="${esc(safe)}" target="_blank" rel="noopener noreferrer">${esc(t)}</a>`:esc(t);};
   const fundingGroups = VS.fundingRecordGroups(c);
   const renderFundingRound = (r, historical) => {
     const historyBadge = historical ? ' <span class="b b-plain">Superseded / withdrawn</span>' : '';
@@ -923,9 +923,12 @@ function discoveredProfile(c) {
       : '';
     const observationList = observations.length
       ? '<details><summary>Source observations (' + observations.length + ')</summary><ul>' +
-        observations.map(o => '<li>' + link(o.source_url, o.publisher || 'Source') + ' · ' +
-          esc(o.amount_text || o.amount || 'Amount not stated') + ' ' + esc(o.currency || '') + ' · ' +
-          esc(o.evidence_status || 'Evidence status unknown') + ' · ' + esc(o.match_reason || '') + '</li>').join('') +
+        observations.map(o => '<li>' + link(o.source_url, o.publisher || 'Source') +
+          (o.source_observation_id != null ? ' · Observation ' + esc(o.source_observation_id) : '') +
+          ' · origin ' + esc(o.origin_group || 'unknown') + ' · role ' + esc(o.source_role || 'unknown') +
+          ' · ' + esc(o.amount_text || o.amount || 'Amount not stated') + ' ' + esc(o.currency || '') + ' · ' +
+          esc(o.evidence_status || 'Evidence status unknown') + ' · ' + esc(o.match_reason || '') +
+          (o.is_current === false ? ' · superseded observation' : '') + '</li>').join('') +
         '</ul></details>'
       : '';
     return '<article class="funding-round"><h3>' + esc(r.round_type || 'Round not specified') + ' · ' +
