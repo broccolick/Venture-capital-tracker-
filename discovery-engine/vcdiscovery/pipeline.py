@@ -325,8 +325,10 @@ def _ingest_funding_news(session, item: NewsItem, article: NewsArticle, stats, t
     ext = extract_funding(item.title, item.summary, item.source_type)
     if not ext:
         return
+    # Only set fields that can be attached to the current source observation below.
+    # Location phrases extracted from headlines are estimates, not verified headquarters.
     res = resolve_or_create(session, ext.company_name, discovered_via=item.source_key, defaults={
-        "industry": ext.industry_hint, "description": None, **_location_defaults(ext.location_hint),
+        "industry": ext.industry_hint, "description": None,
     })
     startup = res.startup
     if res.created:
@@ -344,6 +346,16 @@ def _ingest_funding_news(session, item: NewsItem, article: NewsArticle, stats, t
                       source_type=item.source_type, publisher=item.publisher, url=article.url, article=article,
                       published_at=item.published_at, is_estimate=True,
                       note=f"Estimated from headline wording ('{ext.descriptor or item.title[:60]}')")
+    for location_field, location_value in _location_defaults(ext.location_hint).items():
+        if location_value and not getattr(startup, location_field):
+            setattr(startup, location_field, location_value)
+            add_citation(
+                session, startup, location_field, str(location_value), "reported", key=f"a{article.id}:{location_field}",
+                source_type=item.source_type, publisher=item.publisher, url=article.url, article=article,
+                published_at=item.published_at, is_estimate=True,
+                note=f"Estimated from location wording in the funding headline ('{ext.location_hint}'); "
+                     "not independently verified as headquarters.",
+            )
     touched.add(startup.id)
     _mention(session, article, startup, "extracted_subject")
     # Publication time is not the same as the funding event date. Use it only as an

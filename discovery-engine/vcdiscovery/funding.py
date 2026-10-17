@@ -616,11 +616,32 @@ def refresh_funding_summary(startup: Startup) -> None:
     )
     if dated:
         latest = dated[-1]
-        startup.latest_funding_amount = latest.amount
-        startup.latest_funding_currency = latest.currency
         startup.latest_funding_date = latest.announced_date
-        startup.latest_funding_status = latest.evidence_status
-        if latest.round_type and latest.evidence_status != "regulatory_filing":
-            startup.funding_stage = latest.round_type
+        latest_conflicts = [
+            r for r in active_rounds if r.conflict and r.round_type == latest.round_type
+            and (
+                r.announced_date is None or latest.announced_date is None
+                or abs((r.announced_date - latest.announced_date).days) <= SAME_EVENT_WINDOW_DAYS
+            )
+        ]
+        if latest_conflicts:
+            # Keep the event and its status visible, but don't present either disputed amount
+            # as the single "latest funding" value.
+            startup.latest_funding_amount = None
+            startup.latest_funding_currency = None
+            startup.latest_funding_status = "conflict"
+        else:
+            startup.latest_funding_amount = latest.amount
+            startup.latest_funding_currency = latest.currency
+            startup.latest_funding_status = latest.evidence_status
+            if latest.round_type and latest.evidence_status != "regulatory_filing":
+                startup.funding_stage = latest.round_type
+    else:
+        # A corrected/retracted source may leave no active funding claim. Clear the former
+        # summary instead of displaying the old amount after all supporting claims went inactive.
+        startup.latest_funding_amount = None
+        startup.latest_funding_currency = None
+        startup.latest_funding_date = None
+        startup.latest_funding_status = None
     if not any(r.is_current and r.conflict for r in startup.rounds):
         startup.remove_flag("conflicting_funding")

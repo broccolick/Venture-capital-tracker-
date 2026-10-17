@@ -421,6 +421,28 @@ def test_source_revision_conflicts_with_another_current_source(settings):
         assert current_revision["independent_source"] is False
         startup = s.scalar(select(Startup).where(Startup.name == "Acme Robotics"))
         assert startup.total_funding_amount is None
+        assert startup.latest_funding_amount is None
+        assert startup.latest_funding_currency is None
+        assert startup.latest_funding_status == "conflict"
+
+
+def test_same_url_correction_withdraws_stale_latest_funding_summary(settings):
+    url = "https://news.example.com/corrected-away"
+    ingest(settings, [news("Acme Robotics raises $12M Series A", url, publisher="Outlet A")])
+    with db.session_scope() as s:
+        startup = s.scalar(select(Startup).where(Startup.name == "Acme Robotics"))
+        assert startup.latest_funding_amount == 12e6
+
+    ingest(settings, [news("Acme Robotics opens a new robotics laboratory", url, publisher="Outlet A")])
+
+    with db.session_scope() as s:
+        startup = s.scalar(select(Startup).where(Startup.name == "Acme Robotics"))
+        assert startup.total_funding_amount is None
+        assert startup.latest_funding_amount is None
+        assert startup.latest_funding_currency is None
+        assert startup.latest_funding_date is None
+        assert startup.latest_funding_status is None
+        assert all(not rnd.is_current for rnd in startup.rounds)
 
 
 def test_same_url_unchanged_fetch_does_not_create_a_revision_or_new_evidence(settings):
@@ -438,6 +460,23 @@ def test_same_url_unchanged_fetch_does_not_create_a_revision_or_new_evidence(set
         assert s.scalar(select(func.count(SourceObservation.id))) == before_observations
         assert s.scalar(select(func.count(Citation.id))) == before_citations
         assert s.scalar(select(func.count(DiscoverySignal.id))) == before_signals
+
+
+def test_location_inferred_from_funding_headline_is_cited_as_estimate(settings):
+    ingest(settings, [news(
+        "Austin-based Acme Robotics raises $12M Series A",
+        "https://news.example.com/acme-austin-round", publisher="Outlet A",
+    )])
+
+    with db.session_scope() as s:
+        startup = s.scalar(select(Startup).where(Startup.name == "Acme Robotics"))
+        assert startup is not None and startup.hq_city == "Austin"
+        citation = s.scalar(select(Citation).where(
+            Citation.startup_id == startup.id, Citation.field_name == "hq_city", Citation.is_current.is_(True)
+        ))
+        assert citation is not None and citation.is_estimate is True
+        assert citation.source_observation_id is not None
+        assert "not independently verified as headquarters" in citation.note
 
 
 def test_existing_startup_industry_enrichment_is_cited(settings):
