@@ -269,8 +269,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/funding-rounds", tags=["research"])
     def funding_rounds(session: Session = Depends(get_db), evidence_status: str | None = None,
-                       conflict: bool | None = None, limit: int = Query(100, le=1000)):
+                       conflict: bool | None = None, include_history: bool = False,
+                       limit: int = Query(100, le=1000)):
         query = select(FundingRound)
+        if not include_history:
+            query = query.where(FundingRound.is_current.is_(True))
         if evidence_status:
             query = query.where(FundingRound.evidence_status == evidence_status)
         if conflict is not None:
