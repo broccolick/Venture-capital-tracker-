@@ -21,6 +21,8 @@ class NewsItem:
     published_at: datetime | None = None
     community_metrics: dict | None = None  # e.g. {"points": 120, "comments": 40, "discussion_url": ...}
     category: str = "news"  # news | funding | press_release | video | community
+    origin_group: str | None = None  # known underlying information origin; unknown means unverified
+    source_role: str | None = None  # e.g. independent_reporter | company_statement | community | regulator
 
 
 @dataclass

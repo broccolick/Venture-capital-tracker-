@@ -16,7 +16,8 @@ from .base import NewsItem
 
 class RSSSource:
     def __init__(self, key: str, name: str, url: str, publisher: str, group: str = "news",
-                 source_type: str = "news", max_items: int = 100):
+                 source_type: str = "news", max_items: int = 100, origin_group: str | None = None,
+                 source_role: str | None = None):
         self.key = key
         self.name = name
         self.url = url
@@ -24,6 +25,8 @@ class RSSSource:
         self.group = group  # news | funding
         self.source_type = source_type  # news | press_release | video
         self.max_items = max_items
+        self.origin_group = origin_group
+        self.source_role = source_role
 
     def fetch(self, client: PoliteClient) -> list[NewsItem]:
         resp = client.get(self.url, headers={"Accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.8"})
@@ -59,5 +62,7 @@ def parse_feed(content: bytes | str, source: RSSSource) -> list[NewsItem]:
             summary=short(entry.get("summary") or entry.get("description")),
             published_at=_entry_time(entry),
             category=source.group if source.source_type != "press_release" else "press_release",
+            origin_group=source.origin_group,
+            source_role=source.source_role,
         ))
     return items
