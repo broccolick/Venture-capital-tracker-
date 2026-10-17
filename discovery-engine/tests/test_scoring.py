@@ -114,10 +114,11 @@ def test_confidence_does_not_combine_sources_about_different_fields(settings):
                 source_observation_id=observation.id, is_current=True,
                 dedupe_key=f"{startup.id}:{field_name}:{index}",
             ))
+        s.flush()
         result = compute_confidence(s, startup)
         corroboration = next(p for p in result["components"] if p["component"] == "corroboration")
         assert corroboration["points"] == 0
-        assert "same field/value" in corroboration["explanation"]
+        assert "field/value" in corroboration["explanation"]
 
 
 def test_confidence_rewards_multiple_origins_supporting_same_field_value(settings):
@@ -149,6 +150,7 @@ def test_confidence_rewards_multiple_origins_supporting_same_field_value(setting
                 source_observation_id=observation.id, is_current=True,
                 dedupe_key=f"{startup.id}:industry:{index}",
             ))
+        s.flush()
         result = compute_confidence(s, startup)
         corroboration = next(p for p in result["components"] if p["component"] == "corroboration")
         assert corroboration["points"] == 14

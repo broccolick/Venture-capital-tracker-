@@ -17,6 +17,8 @@ KEY_FIELDS = ["website", "industry", "description", "hq_city", "founded_year", "
 
 
 def compute_confidence(session: Session, startup: Startup, stale_after_days: int = 180) -> dict:
+    # Evaluate evidence and fields written earlier in this transaction, not just committed rows.
+    session.flush()
     parts: list[dict] = []
 
     def add(component: str, points: float, why: str) -> None:
