@@ -233,7 +233,7 @@ def ingest_news_item(session: Session, item: NewsItem, settings: Settings, match
         is_revision = True
         revision_observation = _record_source_observation(
             session, article, source_key=item.source_key, source_type=item.source_type,
-            source_url=url, title=item.title, summary=item.summary, published_at=item.published_at,
+            publisher=item.publisher, source_url=url, title=item.title, summary=item.summary, published_at=item.published_at,
             retrieved_at=now, fingerprint=fingerprint, revision_number=previous.revision_number + 1,
             origin_group=item.origin_group, source_role=item.source_role,
         )
