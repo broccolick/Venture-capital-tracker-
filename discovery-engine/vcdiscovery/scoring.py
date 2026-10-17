@@ -98,7 +98,7 @@ class Context:
     def __init__(self, session: Session, startup: Startup, momentum_days: int):
         self.s = startup
         self.now = utcnow()
-        self.rounds = list(startup.rounds)
+        self.rounds = [r for r in startup.rounds if r.is_current]
         self.signals = list(session.scalars(select(DiscoverySignal).where(DiscoverySignal.startup_id == startup.id)))
         self.articles = list(session.scalars(
             select(NewsArticle).join(ArticleMention, ArticleMention.article_id == NewsArticle.id)
@@ -121,7 +121,7 @@ def factor_market(ctx: Context):
     rows = ctx.session.execute(
         select(Startup.industry, func.count(func.distinct(FundingRound.startup_id)))
         .join(FundingRound, FundingRound.startup_id == Startup.id)
-        .where(FundingRound.evidence_status.in_(RAISED_STATUSES), FundingRound.announced_date >= since,
+        .where(FundingRound.is_current.is_(True), FundingRound.evidence_status.in_(RAISED_STATUSES), FundingRound.announced_date >= since,
                Startup.industry.is_not(None), Startup.is_demo == s.is_demo)
         .group_by(Startup.industry)).all()
     total_events = sum(c for _, c in rows)

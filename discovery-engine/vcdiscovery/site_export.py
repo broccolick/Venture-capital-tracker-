@@ -44,6 +44,7 @@ def _company(session: Session, s: Startup) -> dict:
             "discovered_via", "first_discovered_at", "last_updated_at", "latest_news", "founders", "key_people",
             "investors", "valuation", "revenue", "primary_source_url", "confidence_breakdown")},
         "funding_rounds": d["funding_rounds"],
+        "funding_history": d["funding_history"],
         "sec_filings": [{k: f[k] for k in (
             "form_type", "issuer_name", "filing_date", "industry_group", "total_offering_amount",
             "offering_amount_indefinite", "total_amount_sold", "investor_count", "filing_url", "match_status",

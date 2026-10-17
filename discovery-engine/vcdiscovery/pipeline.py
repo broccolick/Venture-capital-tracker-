@@ -2,6 +2,7 @@
 deduplicate, and refresh confidence scores. One failing source never stops the others."""
 from __future__ import annotations
 
+import hashlib
 import re
 import traceback
 from datetime import date, datetime, timedelta
@@ -15,7 +16,7 @@ from .confidence import compute_confidence
 from .config import Settings
 from .db import session_scope
 from .extraction import extract_funding, extract_hn
-from .funding import record_round, refresh_funding_summary
+from .funding import record_round, refresh_funding_summary, supersede_source_revision
 from .http import PoliteClient
 from .models import (
     ArticleMention,
@@ -25,6 +26,7 @@ from .models import (
     JobLock,
     JobRun,
     NewsArticle,
+    SourceObservation,
     SecFiling,
     ReviewEvent,
     Startup,
@@ -77,39 +79,85 @@ def release_lock(session: Session, name: str) -> None:
 
 # --------------------------------------------------------------------------- helpers
 
+def _source_fingerprint(
+    source_key: str, source_type: str, publisher: str | None, source_url: str,
+    title: str, summary: str | None, published_at: datetime | None,
+    origin_group: str | None = None, source_role: str | None = None,
+) -> str:
+    """Fingerprint source metadata relevant to extracting or interpreting a claim."""
+    parts = (
+        source_key or "", source_type or "", publisher or "", source_url or "",
+        title or "", summary or "", published_at.isoformat() if published_at else "",
+        origin_group or "", source_role or "",
+    )
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+
+
+def _record_source_observation(
+    session: Session, article: NewsArticle, *, source_key: str, source_type: str,
+    publisher: str | None, source_url: str, title: str, summary: str | None,
+    published_at: datetime | None, retrieved_at: datetime, fingerprint: str,
+    revision_number: int, origin_group: str | None = None, source_role: str | None = None,
+) -> SourceObservation:
+    observation = SourceObservation(
+        article_id=article.id, revision_number=revision_number, source_key=source_key,
+        source_type=source_type, publisher=publisher, source_url=source_url, title=title,
+        summary=summary, published_at=published_at, retrieved_at=retrieved_at, fingerprint=fingerprint,
+        origin_group=origin_group, source_role=source_role,
+    )
+    session.add(observation)
+    session.flush()
+    return observation
+
+
+def _latest_source_observation(session: Session, article_id: int) -> SourceObservation | None:
+    return session.scalar(select(SourceObservation).where(
+        SourceObservation.article_id == article_id
+    ).order_by(SourceObservation.revision_number.desc()).limit(1))
+
+
+def _observation_for_article(session: Session, article: NewsArticle | None) -> SourceObservation | None:
+    return _latest_source_observation(session, article.id) if article and article.id is not None else None
+
+
 def add_citation(session: Session, startup: Startup, field: str, value: str | None, status: str, *, key: str,
                   source_type: str | None, publisher: str | None, url: str | None, article: NewsArticle | None = None,
                   filing: SecFiling | None = None, published_at: datetime | None = None, is_estimate: bool = False,
                   note: str | None = None) -> None:
-    dedupe = f"{startup.id}:{field}:{key}"
+    observation = _observation_for_article(session, article)
+    dedupe = (f"{startup.id}:{field}:observation:{observation.id}"
+              if observation else f"{startup.id}:{field}:{key}")
     if session.scalar(select(exists().where(Citation.dedupe_key == dedupe))):
         return
     session.add(Citation(
         startup_id=startup.id, field_name=field, value_text=value, evidence_status=status, is_estimate=is_estimate,
         source_type=source_type, publisher=publisher, source_url=url, article_id=article.id if article else None,
-        sec_filing_id=filing.id if filing else None, published_at=published_at, note=note, dedupe_key=dedupe,
+        source_observation_id=observation.id if observation else None,
+        sec_filing_id=filing.id if filing else None, published_at=published_at, note=note,
+        dedupe_key=dedupe, is_current=True,
     ))
-
 
 def _add_signal(session: Session, startup: Startup, signal_type: str, key: str, *, source_key: str, detail: str,
                 url: str | None, observed_at: datetime | None, article: NewsArticle | None = None,
                 filing: SecFiling | None = None) -> bool:
-    if session.scalar(select(exists().where(DiscoverySignal.dedupe_key == key))):
+    observation = _observation_for_article(session, article)
+    dedupe = f"{key}:observation:{observation.id}" if observation else key
+    if session.scalar(select(exists().where(DiscoverySignal.dedupe_key == dedupe))):
         return False
     session.add(DiscoverySignal(
         startup_id=startup.id, signal_type=signal_type, source_key=source_key, detail=detail, source_url=url,
-        observed_at=observed_at, article_id=article.id if article else None, sec_filing_id=filing.id if filing else None,
-        dedupe_key=key,
+        observed_at=observed_at, article_id=article.id if article else None,
+        source_observation_id=observation.id if observation else None,
+        sec_filing_id=filing.id if filing else None, dedupe_key=dedupe, is_current=True,
     ))
     return True
-
 
 def _mention(session: Session, article: NewsArticle, startup: Startup, method: str) -> None:
     if not session.scalar(select(exists().where(
             ArticleMention.article_id == article.id, ArticleMention.startup_id == startup.id))):
         session.add(ArticleMention(article_id=article.id, startup_id=startup.id, match_method=method))
     when = article.published_at or article.retrieved_at
-    if startup.latest_news_date is None or (when and when > startup.latest_news_date):
+    if startup.latest_news_date is None or (when and when >= startup.latest_news_date):
         startup.latest_news_title, startup.latest_news_url, startup.latest_news_date = article.title, article.url, when
 
 
@@ -151,29 +199,115 @@ class NameMatcher:
 def ingest_news_item(session: Session, item: NewsItem, settings: Settings, matcher: NameMatcher) -> dict:
     stats = {"new": 0, "duplicate": 0, "startups_created": 0}
     url = canonical_url(item.url)
-    if not url or session.scalar(select(exists().where(NewsArticle.url == url))):
+    if not url:
         stats["duplicate"] = 1
         return stats
-    fp = title_fingerprint(item.title)
-    when = item.published_at or utcnow()
-    syndicated = session.scalar(select(NewsArticle).where(
-        NewsArticle.title_fingerprint == fp, NewsArticle.duplicate_of_id.is_(None),
-        NewsArticle.published_at.between(when - SYNDICATION_WINDOW, when + SYNDICATION_WINDOW)))
-    cls = classify_text(item.title, item.summary)
-    article = NewsArticle(
-        source_key=item.source_key, source_type=item.source_type, publisher=item.publisher, url=url, title=item.title,
-        summary=item.summary, published_at=item.published_at, title_fingerprint=fp,
-        duplicate_of_id=syndicated.id if syndicated else None, event_types=cls["event_types"],
-        sentiment=cls["sentiment"], sentiment_score=cls["sentiment_score"], classification_evidence=cls["evidence"],
-        community_metrics=item.community_metrics,
+
+    now = utcnow()
+    fingerprint = _source_fingerprint(
+        item.source_key, item.source_type, item.publisher, url, item.title, item.summary, item.published_at,
+        item.origin_group, item.source_role,
     )
-    session.add(article)
-    session.flush()
-    stats["new"] = 1
+    article = session.scalar(select(NewsArticle).where(NewsArticle.url == url))
+    is_revision = False
+    if article:
+        previous = _latest_source_observation(session, article.id)
+        if previous is None:
+            # Backfill a baseline for rows captured before source observations were introduced.
+            baseline_fp = _source_fingerprint(
+                article.source_key, article.source_type, article.publisher, article.url, article.title,
+                article.summary, article.published_at,
+            )
+            previous = _record_source_observation(
+                session, article, source_key=article.source_key, source_type=article.source_type,
+                publisher=article.publisher, source_url=article.url, title=article.title, summary=article.summary,
+                published_at=article.published_at, retrieved_at=article.retrieved_at or now,
+                fingerprint=baseline_fp, revision_number=1,
+            )
+        if previous.fingerprint == fingerprint:
+            # Update last-checked time only; unchanged fetches are not new claim evidence.
+            article.retrieved_at = now
+            stats["duplicate"] = 1
+            return stats
+
+        is_revision = True
+        revision_observation = _record_source_observation(
+            session, article, source_key=item.source_key, source_type=item.source_type,
+            publisher=item.publisher, source_url=url, title=item.title, summary=item.summary, published_at=item.published_at,
+            retrieved_at=now, fingerprint=fingerprint, revision_number=previous.revision_number + 1,
+            origin_group=item.origin_group, source_role=item.source_role,
+        )
+        # Funding claims from the older source version are no longer current, but remain in history.
+        supersede_source_revision(session, article.id, revision_observation.id)
+        # Preserve old rows for audit but remove them from the current profile view.
+        for citation in session.scalars(select(Citation).where(
+                Citation.article_id == article.id, Citation.is_current.is_(True))):
+            citation.is_current = False
+        for signal in session.scalars(select(DiscoverySignal).where(
+                DiscoverySignal.article_id == article.id, DiscoverySignal.is_current.is_(True))):
+            signal.is_current = False
+
+        old_startups = {mention.startup.id: mention.startup for mention in list(article.mentions)}
+        for mention in list(article.mentions):
+            session.delete(mention)
+        session.flush()
+        for startup in old_startups.values():
+            if startup.latest_news_url == article.url:
+                latest_other = session.scalar(
+                    select(NewsArticle).join(ArticleMention, ArticleMention.article_id == NewsArticle.id)
+                    .where(ArticleMention.startup_id == startup.id, NewsArticle.id != article.id,
+                           NewsArticle.duplicate_of_id.is_(None))
+                    .order_by(NewsArticle.published_at.desc().nulls_last()).limit(1)
+                )
+                startup.latest_news_title = latest_other.title if latest_other else None
+                startup.latest_news_url = latest_other.url if latest_other else None
+                startup.latest_news_date = ((latest_other.published_at or latest_other.retrieved_at)
+                                            if latest_other else None)
+
+        cls = classify_text(item.title, item.summary)
+        article.source_key, article.source_type, article.publisher = item.source_key, item.source_type, item.publisher
+        article.title, article.summary, article.published_at = item.title, item.summary, item.published_at
+        article.retrieved_at, article.title_fingerprint = now, title_fingerprint(item.title)
+        article.event_types, article.sentiment = cls["event_types"], cls["sentiment"]
+        article.sentiment_score, article.classification_evidence = cls["sentiment_score"], cls["evidence"]
+        article.community_metrics = item.community_metrics
+        article.duplicate_of_id = None
+        stats["new"] = 1  # records a new source version, not another canonical article
+    else:
+        fp = title_fingerprint(item.title)
+        article = NewsArticle(
+            source_key=item.source_key, source_type=item.source_type, publisher=item.publisher, url=url,
+            title=item.title, summary=item.summary, published_at=item.published_at, retrieved_at=now,
+            title_fingerprint=fp, community_metrics=item.community_metrics,
+        )
+        cls = classify_text(item.title, item.summary)
+        article.event_types, article.sentiment = cls["event_types"], cls["sentiment"]
+        article.sentiment_score, article.classification_evidence = cls["sentiment_score"], cls["evidence"]
+        session.add(article)
+        session.flush()
+        _record_source_observation(
+            session, article, source_key=item.source_key, source_type=item.source_type, publisher=item.publisher,
+            source_url=url, title=item.title, summary=item.summary, published_at=item.published_at,
+            retrieved_at=now, fingerprint=fingerprint, revision_number=1,
+            origin_group=item.origin_group, source_role=item.source_role,
+        )
+        stats["new"] = 1
+
+    fp = title_fingerprint(item.title)
+    when = item.published_at or now
+    # A known URL with changed captured metadata is a revision. Reprocess it even when
+    # another article has the same title fingerprint; otherwise a corrected summary can vanish
+    # behind the syndication shortcut.
+    syndicated = None
+    if not is_revision:
+        syndicated = session.scalar(select(NewsArticle).where(
+            NewsArticle.url != url, NewsArticle.title_fingerprint == fp, NewsArticle.duplicate_of_id.is_(None),
+            NewsArticle.published_at.between(when - SYNDICATION_WINDOW, when + SYNDICATION_WINDOW),
+        ))
     if syndicated:
-        # Same story republished: link it to the same companies but do not count it as new evidence.
-        for m in syndicated.mentions:
-            _mention(session, article, m.startup, "syndicated_copy")
+        article.duplicate_of_id = syndicated.id
+        for mention in syndicated.mentions:
+            _mention(session, article, mention.startup, "syndicated_copy")
         stats["duplicate"] = 1
         return stats
 
@@ -194,13 +328,14 @@ def ingest_news_item(session: Session, item: NewsItem, settings: Settings, match
     stats["touched"] = touched
     return stats
 
-
 def _ingest_funding_news(session, item: NewsItem, article: NewsArticle, stats, touched, matcher) -> None:
     ext = extract_funding(item.title, item.summary, item.source_type)
     if not ext:
         return
+    # Only set fields that can be attached to the current source observation below.
+    # Location phrases extracted from headlines are estimates, not verified headquarters.
     res = resolve_or_create(session, ext.company_name, discovered_via=item.source_key, defaults={
-        "industry": ext.industry_hint, "description": None, **_location_defaults(ext.location_hint),
+        "industry": ext.industry_hint, "description": None,
     })
     startup = res.startup
     if res.created:
@@ -214,12 +349,27 @@ def _ingest_funding_news(session, item: NewsItem, article: NewsArticle, stats, t
                           note=f"Estimated from headline wording ('{ext.descriptor or item.title[:60]}')")
     if not startup.industry and ext.industry_hint:
         startup.industry = ext.industry_hint
+        add_citation(session, startup, "industry", ext.industry_hint, "reported", key=f"a{article.id}",
+                      source_type=item.source_type, publisher=item.publisher, url=article.url, article=article,
+                      published_at=item.published_at, is_estimate=True,
+                      note=f"Estimated from headline wording ('{ext.descriptor or item.title[:60]}')")
+    for location_field, location_value in _location_defaults(ext.location_hint).items():
+        if location_value and not getattr(startup, location_field):
+            setattr(startup, location_field, location_value)
+            add_citation(
+                session, startup, location_field, str(location_value), "reported", key=f"a{article.id}:{location_field}",
+                source_type=item.source_type, publisher=item.publisher, url=article.url, article=article,
+                published_at=item.published_at, is_estimate=True,
+                note=f"Estimated from location wording in the funding headline ('{ext.location_hint}'); "
+                     "not independently verified as headquarters.",
+            )
     touched.add(startup.id)
     _mention(session, article, startup, "extracted_subject")
     # Publication time is not the same as the funding event date. Use it only as an
     # explicitly labelled proxy when present; never substitute retrieval/current time.
     announced = item.published_at.date() if item.published_at else None
     announced_date_basis = "publication_date_proxy" if item.published_at else "unknown"
+    source_observation = _observation_for_article(session, article)
     rnd, outcome = record_round(
         session, startup, round_type=ext.round_type, amount=ext.amount, currency=ext.currency,
         amount_text=ext.amount_text, announced=announced, evidence_status=ext.evidence_status,
@@ -227,6 +377,8 @@ def _ingest_funding_news(session, item: NewsItem, article: NewsArticle, stats, t
         investors=ext.investors, leads=ext.lead_investors,
         announced_date_basis=announced_date_basis,
         source_published_at=item.published_at.isoformat() if item.published_at else None,
+        source_observation_id=source_observation.id if source_observation else None,
+        origin_group=item.origin_group, source_role=item.source_role,
     )
     value = " ".join(p for p in (ext.round_type, ext.amount_text) if p) or "Funding mentioned"
     add_citation(session, startup, "funding_round", value, ext.evidence_status, key=f"a{article.id}",
@@ -266,15 +418,22 @@ def _ingest_hn(session, item: NewsItem, article: NewsArticle, settings: Settings
     domain = company_domain(item.url)
     if ext.kind == "show_hn" and (points < settings.hn_min_points or not domain):
         return  # side projects and repo links are kept as articles but not promoted to companies
+    # Do not silently populate a company description: fill it only with cited evidence.
     res = resolve_or_create(session, ext.company_name, website=item.url if domain else None,
-                            discovered_via=item.source_key, defaults={"description": ext.tagline})
+                            discovered_via=item.source_key, defaults={})
     startup = res.startup
     if res.created:
         stats["startups_created"] += 1
         matcher.add(startup)
         startup.primary_source_url = metrics.get("discussion_url") or article.url
-    elif not startup.description and ext.tagline:
+    if not startup.description and ext.tagline:
         startup.description = ext.tagline
+        add_citation(
+            session, startup, "description", ext.tagline, "community_sourced", key=f"hn:{metrics.get('hn_id', article.id)}",
+            source_type=item.source_type, publisher=item.publisher,
+            url=metrics.get("discussion_url") or article.url, article=article, published_at=item.published_at,
+            note="Description inferred from a Hacker News submission tagline; verify before relying on it.",
+        )
     touched.add(startup.id)
     _mention(session, article, startup, "hn_title")
     discussion = metrics.get("discussion_url")
@@ -388,6 +547,10 @@ def _state_code(value: str) -> str:
 
 
 def _apply_filing(session: Session, startup: Startup, filing: SecFiling, executives: list[str]) -> None:
+    filed = filing.filing_date
+    published_at = datetime.combine(filed, datetime.min.time()) if filed else None
+    mapped_industry = INDUSTRY_LABELS.get(filing.industry_group or "")
+
     if not startup.legal_name:
         startup.legal_name = filing.issuer_name
     startup.sec_cik = startup.sec_cik or filing.cik
@@ -397,37 +560,133 @@ def _apply_filing(session: Session, startup: Startup, filing: SecFiling, executi
         startup.founded_year = filing.year_of_incorporation
     if not startup.hq_state and filing.state_or_country:
         startup.hq_state, startup.hq_city = filing.state_or_country, startup.hq_city or (filing.city or "").title() or None
+    if not startup.industry and mapped_industry:
+        startup.industry = mapped_industry
+
+    # Preserve field-level provenance for Form D enrichment. Year of incorporation and the
+    # broad industry-group mapping are proxies, not definitive claims about founding year/industry.
+    citation_fields = [
+        ("legal_name", startup.legal_name if startup.legal_name == filing.issuer_name else None, False,
+         "Legal name as listed on SEC Form D."),
+        ("sec_cik", startup.sec_cik if startup.sec_cik == filing.cik else None, False,
+         "SEC Central Index Key associated with this filing."),
+        ("founded_year", startup.founded_year if filing.year_of_incorporation and startup.founded_year == filing.year_of_incorporation else None,
+         True, "Year of incorporation on Form D used as an age proxy; it is not necessarily the business founding year."),
+        ("hq_city", startup.hq_city if filing.city and startup.hq_city == filing.city.title() else None, False,
+         "City as reported on SEC Form D."),
+        ("hq_state", startup.hq_state if filing.state_or_country and startup.hq_state == filing.state_or_country else None, False,
+         "State or country field as reported on SEC Form D."),
+        ("industry", startup.industry if mapped_industry and startup.industry == mapped_industry else None, True,
+         f"Broad industry inferred from SEC industry group '{filing.industry_group or 'unknown'}'."),
+    ]
+    for field_name, value, is_estimate, note in citation_fields:
+        if value is not None:
+            add_citation(
+                session, startup, field_name, str(value), "regulatory_filing",
+                key=filing.accession_number, source_type="regulatory", publisher="SEC EDGAR",
+                url=filing.filing_url, filing=filing, published_at=published_at,
+                is_estimate=is_estimate, note=note,
+            )
 
     sold = filing.total_amount_sold
     offered = "Indefinite" if filing.offering_amount_indefinite else (
         f"${filing.total_offering_amount:,.0f}" if filing.total_offering_amount is not None else "not stated")
     summary = f"Form {filing.form_type}: ${sold or 0:,.0f} sold of {offered} offered"
-    filed = filing.filing_date or utcnow().date()
-    if sold:
+    amendment_candidate_ids: list[int] = []
+
+    if sold is not None:
         existing = None
         if filing.is_amendment:
-            existing = session.scalar(select(FundingRound).where(
-                FundingRound.startup_id == startup.id, FundingRound.evidence_status == "regulatory_filing"
-            ).order_by(FundingRound.announced_date.desc()))
+            candidates = list(session.scalars(select(FundingRound).where(
+                FundingRound.startup_id == startup.id,
+                FundingRound.evidence_status == "regulatory_filing",
+                FundingRound.is_current.is_(True),
+            ).order_by(FundingRound.announced_date.desc())))
+            if len(candidates) == 1:
+                existing = candidates[0]
+            else:
+                amendment_candidate_ids = [row.id for row in candidates if row.id is not None]
         if existing:
+            previous_filing_id = existing.sec_filing_id
+            extra = dict(existing.extra or {})
+            observations = list(extra.get("funding_observations") or [])
+            if previous_filing_id is not None and not any(
+                    o.get("sec_filing_id") == previous_filing_id for o in observations):
+                old_filing = session.get(SecFiling, previous_filing_id)
+                old_date = old_filing.filing_date if old_filing else existing.announced_date
+                observations.append({
+                    "article_id": None, "source_observation_id": None, "sec_filing_id": previous_filing_id,
+                    "source_url": old_filing.filing_url if old_filing else existing.source_url,
+                    "publisher": "SEC EDGAR", "origin_group": "sec-edgar", "source_role": "regulator",
+                    "round_type": existing.round_type, "amount": existing.amount, "currency": existing.currency,
+                    "amount_text": existing.amount_text,
+                    "announced_date": existing.announced_date.isoformat() if existing.announced_date else None,
+                    "announced_date_basis": "filing_date",
+                    "source_published_at": old_date.isoformat() if old_date else None,
+                    "evidence_status": "regulatory_filing", "outcome": "legacy_baseline",
+                    "match_reason": "Prior Form D value before amendment; offering notice does not prove a completed priced round",
+                    "independent_source": False, "is_current": True,
+                })
+            for observation in observations:
+                if observation.get("sec_filing_id") == previous_filing_id and observation.get("is_current", True):
+                    observation["is_current"] = False
+                    observation["superseded_by_sec_filing_id"] = filing.accession_number
+            observations.append({
+                "article_id": None, "source_observation_id": None, "sec_filing_id": filing.id,
+                "source_url": filing.filing_url, "publisher": "SEC EDGAR",
+                "origin_group": "sec-edgar", "source_role": "regulator",
+                "round_type": existing.round_type, "amount": sold, "currency": "USD", "amount_text": summary,
+                "announced_date": existing.announced_date.isoformat() if existing.announced_date else None,
+                "announced_date_basis": "filing_date",
+                "source_published_at": filed.isoformat() if filed else None,
+                "evidence_status": "regulatory_filing", "outcome": "amended",
+                "match_reason": f"Updated by Form D/A accession {filing.accession_number}; filing date is not the funding-event date",
+                "independent_source": False, "is_current": True,
+            })
+            extra["funding_observations"] = observations
+            extra["announced_date_basis"] = extra.get("announced_date_basis") or "filing_date"
+            existing.extra = extra
+            old_amount = existing.amount
             existing.notes = ((existing.notes + "; ") if existing.notes else "") + (
-                f"Amended by {filing.accession_number} on {filed}: amount sold {existing.amount or 0:,.0f} -> {sold:,.0f}")
+                f"Amended by {filing.accession_number}: amount sold {old_amount or 0:,.0f} -> {sold:,.0f}")
             existing.amount, existing.amount_text, existing.sec_filing_id = sold, summary, filing.id
             existing.source_url = filing.filing_url
+            existing.is_current = True
+            existing.superseded_by_round_id = None
         else:
-            record_round(session, startup, round_type=None, amount=sold, currency="USD", amount_text=summary,
-                         announced=filed, evidence_status="regulatory_filing", publisher="SEC EDGAR",
-                         source_url=filing.filing_url, sec_filing_id=filing.id)
+            new_round, _ = record_round(
+                session, startup, round_type=None, amount=sold, currency="USD", amount_text=summary,
+                announced=filed, evidence_status="regulatory_filing", publisher="SEC EDGAR",
+                source_url=filing.filing_url, sec_filing_id=filing.id,
+                announced_date_basis="filing_date", source_published_at=filed.isoformat() if filed else None,
+                origin_group="sec-edgar", source_role="regulator",
+            )
+            if filing.is_amendment:
+                reason = (
+                    "Form D/A amendment could not be linked to exactly one current regulatory funding record; "
+                    "the filing was preserved separately for review rather than overwriting a possibly unrelated offering."
+                )
+                new_round.notes = ((new_round.notes + "; ") if new_round.notes else "") + reason
+                extra = dict(new_round.extra or {})
+                extra["funding_resolution"] = {
+                    "state": "needs_review", "reason": reason,
+                    "candidate_round_ids": amendment_candidate_ids, "rule_version": 2,
+                }
+                extra["amendment_candidate_round_ids"] = amendment_candidate_ids
+                new_round.extra = extra
+
     _add_signal(session, startup, "regulatory_filing", f"formd:{filing.accession_number}", source_key="sec_form_d",
-                detail=summary, url=filing.filing_url, observed_at=datetime.combine(filed, datetime.min.time()), filing=filing)
+                detail=summary, url=filing.filing_url, observed_at=published_at, filing=filing)
     add_citation(session, startup, "sec_form_d", summary, "regulatory_filing", key=filing.accession_number,
                   source_type="regulatory", publisher="SEC EDGAR", url=filing.filing_url, filing=filing,
-                  published_at=datetime.combine(filed, datetime.min.time()),
+                  published_at=published_at,
                   note="Form D is an offering notice; it does not confirm a priced round, valuation or investor identity")
     if executives:
         add_citation(session, startup, "key_people", ", ".join(executives), "regulatory_filing",
                       key=filing.accession_number, source_type="regulatory", publisher="SEC EDGAR",
-                      url=filing.filing_url, filing=filing, note="Executive officers listed on Form D (not necessarily founders)")
+                      url=filing.filing_url, filing=filing, published_at=published_at,
+                      note="Executive officers listed on Form D (not necessarily founders)")
+    refresh_funding_summary(startup)
 
 
 def link_filing(session: Session, filing: SecFiling, startup: Startup, actor: str = "analyst") -> None:

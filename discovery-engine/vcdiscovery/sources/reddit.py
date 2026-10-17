@@ -90,4 +90,6 @@ def to_item(post: dict, source_key: str, min_score: int) -> NewsItem | None:
         community_metrics={"points": post.get("score") or 0, "comments": post.get("num_comments") or 0,
                            "discussion_url": discussion, "reddit_id": post["name"], "subreddit": post.get("subreddit")},
         category="community",
+        origin_group="reddit-community",
+        source_role="community",
     )

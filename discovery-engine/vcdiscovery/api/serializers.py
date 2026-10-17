@@ -73,6 +73,7 @@ def round_dict(r: FundingRound) -> dict:
         "publishers": r.publishers or [], "investors": [
             {"name": ri.investor.name, "is_lead": ri.is_lead, "source_url": ri.source_url} for ri in r.investors],
         "conflict": r.conflict, "conflict_note": r.conflict_note, "notes": r.notes, "source_url": r.source_url,
+        "is_current": r.is_current, "superseded_by_round_id": r.superseded_by_round_id,
         "announced_date_basis": (r.extra or {}).get("announced_date_basis"),
         "funding_resolution": (r.extra or {}).get("funding_resolution"),
         "funding_observations": (r.extra or {}).get("funding_observations", []),
@@ -113,14 +114,15 @@ def article_dict(a: NewsArticle) -> dict:
 
 def signal_dict(sig: DiscoverySignal) -> dict:
     return {"id": sig.id, "type": sig.signal_type, "source_key": sig.source_key, "detail": sig.detail,
-            "source_url": sig.source_url, "observed_at": iso(sig.observed_at), "detected_at": iso(sig.detected_at)}
+            "source_url": sig.source_url, "observed_at": iso(sig.observed_at), "detected_at": iso(sig.detected_at),
+            "source_observation_id": sig.source_observation_id, "is_current": sig.is_current}
 
 
 def citation_dict(c: Citation) -> dict:
     return {"id": c.id, "field": c.field_name, "value": c.value_text, "evidence_status": c.evidence_status,
             "is_estimate": c.is_estimate, "source_type": c.source_type, "publisher": c.publisher,
             "source_url": c.source_url, "published_at": iso(c.published_at), "retrieved_at": iso(c.retrieved_at),
-            "note": c.note}
+            "source_observation_id": c.source_observation_id, "is_current": c.is_current, "note": c.note}
 
 
 def full_score(score: InvestmentScore | None) -> dict | None:
@@ -150,11 +152,16 @@ def startup_detail(session: Session, s: Startup) -> dict:
         "growth_signals": s.growth_signals, "primary_source_url": s.primary_source_url, "sec_cik": s.sec_cik,
         "last_verified_at": iso(s.last_verified_at),
         "confidence_breakdown": s.confidence_breakdown,
-        "funding_rounds": [round_dict(r) for r in sorted(s.rounds, key=lambda r: r.announced_date or date.min, reverse=True)],
+        "funding_rounds": [round_dict(r) for r in sorted((r for r in s.rounds if r.is_current),
+                                                           key=lambda r: r.announced_date or date.min, reverse=True)],
+        "funding_history": [round_dict(r) for r in sorted((r for r in s.rounds if not r.is_current),
+                                                            key=lambda r: r.announced_date or date.min, reverse=True)],
         "sec_filings": [filing_dict(f) for f in filings],
         "news": [article_dict(a) for a in articles],
-        "signals": [signal_dict(x) for x in sorted(s.signals, key=lambda x: x.detected_at, reverse=True)],
-        "citations": [citation_dict(c) for c in sorted(s.citations, key=lambda c: c.retrieved_at, reverse=True)],
+        "signals": [signal_dict(x) for x in sorted((x for x in s.signals if x.is_current),
+                                                     key=lambda x: x.detected_at, reverse=True)],
+        "citations": [citation_dict(c) for c in sorted((c for c in s.citations if c.is_current),
+                                                         key=lambda c: c.retrieved_at, reverse=True)],
         "score": full_score(score),
         "review_history": [{"from": e.from_status, "to": e.to_status, "note": e.note, "actor": e.actor,
                             "at": iso(e.created_at)} for e in session.scalars(

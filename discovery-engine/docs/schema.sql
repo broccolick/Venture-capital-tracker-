@@ -81,6 +81,30 @@ CREATE INDEX ix_news_articles_title_fingerprint ON news_articles (title_fingerpr
 CREATE INDEX ix_news_articles_published_at ON news_articles (published_at);
 CREATE INDEX ix_news_articles_source_key ON news_articles (source_key);
 
+CREATE TABLE source_observations (
+	id INTEGER NOT NULL,
+	article_id INTEGER NOT NULL,
+	revision_number INTEGER NOT NULL,
+	source_key VARCHAR(80) NOT NULL,
+	source_type VARCHAR(40) NOT NULL,
+	publisher VARCHAR(120),
+	source_url VARCHAR(1000) NOT NULL,
+	title TEXT NOT NULL,
+	summary TEXT,
+	published_at DATETIME,
+	retrieved_at DATETIME NOT NULL,
+	fingerprint VARCHAR(64) NOT NULL,
+	origin_group VARCHAR(160),
+	source_role VARCHAR(40),
+	PRIMARY KEY (id),
+	UNIQUE (article_id, revision_number),
+	FOREIGN KEY(article_id) REFERENCES news_articles (id) ON DELETE CASCADE
+);
+
+CREATE INDEX ix_source_observations_article_id ON source_observations (article_id);
+CREATE INDEX ix_source_observations_fingerprint ON source_observations (fingerprint);
+CREATE INDEX ix_source_observations_origin_group ON source_observations (origin_group);
+
 CREATE TABLE startups (
 	id INTEGER NOT NULL, 
 	external_id VARCHAR(64), 
@@ -278,7 +302,9 @@ CREATE TABLE citations (
 	source_type VARCHAR(40), 
 	publisher VARCHAR(120), 
 	source_url VARCHAR(1000), 
-	article_id INTEGER, 
+	article_id INTEGER,
+	source_observation_id INTEGER,
+	is_current BOOLEAN NOT NULL,
 	sec_filing_id INTEGER, 
 	published_at DATETIME, 
 	retrieved_at DATETIME NOT NULL, 
@@ -286,7 +312,8 @@ CREATE TABLE citations (
 	dedupe_key VARCHAR(255) NOT NULL, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(startup_id) REFERENCES startups (id) ON DELETE CASCADE, 
-	FOREIGN KEY(article_id) REFERENCES news_articles (id) ON DELETE SET NULL, 
+	FOREIGN KEY(article_id) REFERENCES news_articles (id) ON DELETE SET NULL,
+	FOREIGN KEY(source_observation_id) REFERENCES source_observations (id) ON DELETE SET NULL,
 	FOREIGN KEY(sec_filing_id) REFERENCES sec_filings (id) ON DELETE SET NULL, 
 	UNIQUE (dedupe_key)
 );
@@ -298,7 +325,9 @@ CREATE TABLE discovery_signals (
 	startup_id INTEGER NOT NULL, 
 	signal_type VARCHAR(60) NOT NULL, 
 	source_key VARCHAR(80) NOT NULL, 
-	article_id INTEGER, 
+	article_id INTEGER,
+	source_observation_id INTEGER,
+	is_current BOOLEAN NOT NULL,
 	sec_filing_id INTEGER, 
 	detail TEXT, 
 	source_url VARCHAR(1000), 
@@ -307,7 +336,8 @@ CREATE TABLE discovery_signals (
 	dedupe_key VARCHAR(255) NOT NULL, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(startup_id) REFERENCES startups (id) ON DELETE CASCADE, 
-	FOREIGN KEY(article_id) REFERENCES news_articles (id) ON DELETE SET NULL, 
+	FOREIGN KEY(article_id) REFERENCES news_articles (id) ON DELETE SET NULL,
+	FOREIGN KEY(source_observation_id) REFERENCES source_observations (id) ON DELETE SET NULL,
 	FOREIGN KEY(sec_filing_id) REFERENCES sec_filings (id) ON DELETE SET NULL, 
 	UNIQUE (dedupe_key)
 );
@@ -331,16 +361,20 @@ CREATE TABLE funding_rounds (
 	"conflict" BOOLEAN NOT NULL, 
 	conflict_note TEXT, 
 	notes TEXT, 
-	extra JSON, 
-	created_at DATETIME NOT NULL, 
+	extra JSON,
+	is_current BOOLEAN NOT NULL,
+	superseded_by_round_id INTEGER,
+	created_at DATETIME NOT NULL,
 	updated_at DATETIME NOT NULL, 
 	PRIMARY KEY (id), 
 	FOREIGN KEY(startup_id) REFERENCES startups (id) ON DELETE CASCADE, 
 	FOREIGN KEY(article_id) REFERENCES news_articles (id) ON DELETE SET NULL, 
-	FOREIGN KEY(sec_filing_id) REFERENCES sec_filings (id) ON DELETE SET NULL
+	FOREIGN KEY(sec_filing_id) REFERENCES sec_filings (id) ON DELETE SET NULL,
+	FOREIGN KEY(superseded_by_round_id) REFERENCES funding_rounds (id) ON DELETE SET NULL
 );
 
 CREATE INDEX ix_funding_rounds_startup_id ON funding_rounds (startup_id);
+CREATE INDEX ix_funding_rounds_is_current ON funding_rounds (is_current);
 
 CREATE TABLE round_investors (
 	id INTEGER NOT NULL, 
