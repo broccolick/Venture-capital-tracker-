@@ -69,5 +69,7 @@ def parse_hits(hits: list[dict], source_key: str = "hackernews") -> list[NewsIte
                 "hn_id": object_id,
             },
             category="community",
+            origin_group="hackernews-community",
+            source_role="community",
         )
     return list(items.values())

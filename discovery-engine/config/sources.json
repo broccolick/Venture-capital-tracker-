@@ -39,7 +39,9 @@
       "enabled": true,
       "url": "https://techcrunch.com/tag/funding/feed/",
       "publisher": "TechCrunch",
-      "access_notes": "Public RSS feed. Headlines, links and short summaries only."
+      "access_notes": "Public RSS feed. Headlines, links and short summaries only.",
+      "origin_group": "techcrunch",
+      "source_role": "independent_reporter"
     },
     {
       "key": "techcrunch_venture",
@@ -49,7 +51,9 @@
       "enabled": true,
       "url": "https://techcrunch.com/category/venture/feed/",
       "publisher": "TechCrunch",
-      "access_notes": "Public RSS feed. Headlines, links and short summaries only."
+      "access_notes": "Public RSS feed. Headlines, links and short summaries only.",
+      "origin_group": "techcrunch",
+      "source_role": "independent_reporter"
     },
     {
       "key": "techcrunch_startups",
@@ -59,7 +63,9 @@
       "enabled": true,
       "url": "https://techcrunch.com/category/startups/feed/",
       "publisher": "TechCrunch",
-      "access_notes": "Public RSS feed. Headlines, links and short summaries only."
+      "access_notes": "Public RSS feed. Headlines, links and short summaries only.",
+      "origin_group": "techcrunch",
+      "source_role": "independent_reporter"
     },
     {
       "key": "crunchbase_news",
@@ -69,7 +75,9 @@
       "enabled": true,
       "url": "https://news.crunchbase.com/feed/",
       "publisher": "Crunchbase News",
-      "access_notes": "Public RSS feed of free articles. The Crunchbase database itself is a paid product and is NOT accessed."
+      "access_notes": "Public RSS feed of free articles. The Crunchbase database itself is a paid product and is NOT accessed.",
+      "origin_group": "crunchbase-news",
+      "source_role": "independent_reporter"
     },
     {
       "key": "finsmes",
@@ -90,7 +98,9 @@
       "enabled": true,
       "url": "https://www.eu-startups.com/feed/",
       "publisher": "EU-Startups",
-      "access_notes": "Public RSS feed."
+      "access_notes": "Public RSS feed.",
+      "origin_group": "eu-startups",
+      "source_role": "independent_reporter"
     },
     {
       "key": "venturebeat",
@@ -112,7 +122,9 @@
       "source_type": "press_release",
       "url": "https://www.prnewswire.com/rss/financial-services-latest-news/venture-capital-list.rss",
       "publisher": "PR Newswire",
-      "access_notes": "Public RSS feed of press releases. Press releases are company statements (labelled company_announced)."
+      "access_notes": "Public RSS feed of press releases. Press releases are company statements (labelled company_announced).",
+      "origin_group": "prnewswire",
+      "source_role": "press_release_wire"
     },
     {
       "key": "sifted",
@@ -175,7 +187,9 @@
       "enabled": true,
       "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCcefcZRL2oaA_uBNeo5UOWg",
       "publisher": "Y Combinator",
-      "access_notes": "Public YouTube channel feed (no key). Video titles, links and short descriptions only; videos are never downloaded. Funding news in titles is labelled like a news report."
+      "access_notes": "Public YouTube channel feed (no key). Video titles, links and short descriptions only; videos are never downloaded. Funding news in titles is labelled like a news report.",
+      "origin_group": "y-combinator",
+      "source_role": "company_channel"
     },
     {
       "key": "youtube_techcrunch",
@@ -186,7 +200,9 @@
       "enabled": true,
       "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCCjyq_K1Xwfg8Lndy7lKMpA",
       "publisher": "TechCrunch",
-      "access_notes": "Public YouTube channel feed (no key). Video titles, links and short descriptions only; videos are never downloaded. Funding news in titles is labelled like a news report."
+      "access_notes": "Public YouTube channel feed (no key). Video titles, links and short descriptions only; videos are never downloaded. Funding news in titles is labelled like a news report.",
+      "origin_group": "techcrunch",
+      "source_role": "independent_reporter"
     },
     {
       "key": "youtube_a16z",
@@ -197,7 +213,9 @@
       "enabled": true,
       "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC9cn0TuPq4dnbTY-CBsm8XA",
       "publisher": "Andreessen Horowitz (a16z)",
-      "access_notes": "Public YouTube channel feed (no key). Video titles, links and short descriptions only; videos are never downloaded. Funding news in titles is labelled like a news report."
+      "access_notes": "Public YouTube channel feed (no key). Video titles, links and short descriptions only; videos are never downloaded. Funding news in titles is labelled like a news report.",
+      "origin_group": "a16z",
+      "source_role": "investor_channel"
     },
     {
       "key": "youtube_bloomberg_technology",
@@ -208,7 +226,9 @@
       "enabled": true,
       "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCrM7B7SL_g1edFOnmj-SDKg",
       "publisher": "Bloomberg",
-      "access_notes": "Public YouTube channel feed (no key). Video titles, links and short descriptions only; videos are never downloaded. Funding news in titles is labelled like a news report."
+      "access_notes": "Public YouTube channel feed (no key). Video titles, links and short descriptions only; videos are never downloaded. Funding news in titles is labelled like a news report.",
+      "origin_group": "bloomberg-technology",
+      "source_role": "independent_reporter"
     },
     {
       "key": "youtube_this_week_in_startups",
@@ -219,7 +239,9 @@
       "enabled": true,
       "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCkkhmBWfS7pILYIk0izkc3A",
       "publisher": "This Week in Startups",
-      "access_notes": "Public YouTube channel feed (no key). Video titles, links and short descriptions only; videos are never downloaded. Funding news in titles is labelled like a news report."
+      "access_notes": "Public YouTube channel feed (no key). Video titles, links and short descriptions only; videos are never downloaded. Funding news in titles is labelled like a news report.",
+      "origin_group": "this-week-in-startups",
+      "source_role": "media_publisher"
     },
     {
       "key": "youtube_cnbc_television",
@@ -230,7 +252,9 @@
       "enabled": true,
       "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCrp_UI8XtuYfpiqluWLD7Lw",
       "publisher": "CNBC",
-      "access_notes": "Public YouTube channel feed (no key). Video titles, links and short descriptions only; videos are never downloaded. Funding news in titles is labelled like a news report."
+      "access_notes": "Public YouTube channel feed (no key). Video titles, links and short descriptions only; videos are never downloaded. Funding news in titles is labelled like a news report.",
+      "origin_group": "cnbc",
+      "source_role": "independent_reporter"
     },
     {
       "key": "youtube_search",
