@@ -48,3 +48,21 @@ test('discovery filters and sorting', () => {
   assert.deepEqual(VS.filterDiscovery(cos, { evidence: 'rumor' }).map(c => c.name), ['B']);
   assert.deepEqual(VS.filterDiscovery(cos, { q: 'bio' }).map(c => c.name), ['C']);
 });
+
+
+test('funding record groups keep superseded source history separate from current records', () => {
+  const groups = VS.fundingRecordGroups({
+    funding_rounds: [{ id: 11, amount: 12000000 }],
+    funding_history: [{ id: 7, amount: 10000000, superseded_by_round_id: 11 }],
+  });
+  assert.deepEqual(groups.map(g => g.key), ['current', 'historical']);
+  assert.deepEqual(groups.map(g => g.rounds.map(r => r.id)), [[11], [7]]);
+  assert.match(groups[0].note, /does not mean the company is actively fundraising/);
+  assert.match(groups[1].note, /Retained for traceability/);
+});
+
+test('funding record groups tolerate missing or empty history for older snapshots', () => {
+  assert.deepEqual(VS.fundingRecordGroups({ funding_rounds: [{ id: 1 }] }).map(g => g.key), ['current']);
+  assert.deepEqual(VS.fundingRecordGroups({ funding_rounds: [], funding_history: [] }), []);
+  assert.deepEqual(VS.fundingRecordGroups(null), []);
+});

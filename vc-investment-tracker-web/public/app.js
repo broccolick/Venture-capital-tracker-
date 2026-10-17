@@ -910,7 +910,46 @@ function fundingLine(c) {
 }
 function discoveredProfile(c) {
   const sc=c.score;
-  const link=(u,t)=>u?`<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(t)}</a>`:esc(t);
+  const link=(u,t)=>{const safe=VS.safeURL(u||"");return safe?`<a href="${esc(safe)}" target="_blank" rel="noopener noreferrer">${esc(t)}</a>`:esc(t);};
+  const fundingGroups = VS.fundingRecordGroups(c);
+  const renderFundingRound = (r, historical) => {
+    const historyBadge = historical ? ' <span class="b b-plain">Superseded / withdrawn</span>' : '';
+    const investors = Array.isArray(r.investors) ? r.investors : [];
+    const observations = Array.isArray(r.funding_observations) ? r.funding_observations : [];
+    const needsReview = r.funding_resolution?.state === 'needs_review';
+    const review = needsReview
+      ? '<p class="warnline">Needs review: ' + esc(r.funding_resolution.reason) +
+        (r.funding_resolution.candidate_round_ids?.length ? ' · Candidate rounds: ' + r.funding_resolution.candidate_round_ids.map(esc).join(', ') : '') + '</p>'
+      : '';
+    const observationList = observations.length
+      ? '<details><summary>Source observations (' + observations.length + ')</summary><ul>' +
+        observations.map(o => '<li>' + link(o.source_url, o.publisher || 'Source') +
+          (o.source_observation_id != null ? ' · Observation ' + esc(o.source_observation_id) : '') +
+          ' · origin ' + esc(o.origin_group || 'unknown') + ' · role ' + esc(o.source_role || 'unknown') +
+          ' · ' + esc(o.amount_text || o.amount || 'Amount not stated') + ' ' + esc(o.currency || '') + ' · ' +
+          esc(o.evidence_status || 'Evidence status unknown') + ' · ' + esc(o.match_reason || '') +
+          (o.is_current === false ? ' · superseded observation' : '') + '</li>').join('') +
+        '</ul></details>'
+      : '';
+    return '<article class="funding-round"><h3>' + esc(r.round_type || 'Round not specified') + ' · ' +
+      esc(r.amount_display || 'Amount not disclosed') + ' ' + evBadge(r.evidence_status) +
+      (r.conflict ? ' <span class="b b-conf">Conflict</span>' : '') + historyBadge + '</h3>' +
+      '<p>' + esc(r.announced_date || 'Date not supplied') +
+      (r.announced_date_basis === 'publication_date_proxy' ? ' · publication date proxy; event date not verified' : '') +
+      (r.publishers?.length ? ' · ' + r.publishers.map(esc).join(', ') : '') + '</p>' +
+      (investors.length ? '<p>' + investors.map(i => esc(i.name) + (i.is_lead ? ' (lead)' : '')).join(', ') + '</p>' : '') +
+      review +
+      (r.notes ? '<p class="small muted">' + esc(r.notes) + '</p>' : '') +
+      observationList +
+      (r.conflict_note ? '<p class="warnline">' + esc(r.conflict_note) + '</p>' : '') +
+      (historical && r.superseded_by_round_id != null
+        ? '<p class="small muted">Superseded by record ' + esc(r.superseded_by_round_id) + '.</p>'
+        : '') +
+      '<p>' + link(r.source_url, 'Source') + '</p>' +
+      '<p class="small muted">' + (historical
+        ? 'Historical record retained for traceability; excluded from current funding records.'
+        : 'Current retained record; this does not establish that the company is actively fundraising.') + '</p></article>';
+  };
   return `<section class="panel" id="disc-profile"><div class="ph"><div><span class="eyebrow">${esc(c.industry||'Industry not identified')} · ${esc(c.review_status)}</span><h2>${esc(c.name)}</h2></div><div class="controls"><button class="btn primary" data-disc-track="${c.id}">Track</button><button class="btn" id="disc-close">Close</button></div></div>
   <div class="badges">${confB(c.confidence)}${scoreB(c.investment_score)}${(c.flags||[]).map(x=>`<span class="b b-conf">${esc(FLAG_TEXT[x]||x)}</span>`).join('')}</div>
   <dl class="market-facts">
@@ -926,7 +965,9 @@ function discoveredProfile(c) {
   <h3>Investment score: ${sc.total??'not scored'} <span class="muted small">(${esc(sc.rating)}, ${Math.round(sc.coverage*100)}% of weights scorable)</span></h3>
   <div class="tw"><table><thead><tr><th>Factor</th><th class="r">Weight</th><th class="r">Score</th><th>Evidence or reason</th></tr></thead><tbody>${sc.factors.map(x=>`<tr><td>${esc(x.label)}<div class="small muted">${esc(x.method)}</div></td><td class="r">${esc(x.weight)}%</td><td class="r">${x.score==null?'<span class="na">Unscorable</span>':esc(x.score)}${x.override?'<div class="small">analyst</div>':''}</td><td>${x.evidence.length?x.evidence.map(e=>`<div>${link(e.url,e.text)}</div>`).join(''):`<span class="muted">${esc(x.unscorable_reason||'')}</span>`}</td></tr>`).join('')}</tbody></table></div>
   <p class="note">${esc(sc.disclaimer)}</p>`:''}
-  <h3>Funding history</h3>${c.funding_rounds.length?c.funding_rounds.map(r=>`<article class="funding-round"><h3>${esc(r.round_type||'Round not specified')} · ${esc(r.amount_display)} ${evBadge(r.evidence_status)}${r.conflict?' <span class="b b-conf">Conflict</span>':''}</h3><p>${esc(r.announced_date||'Date not supplied')}${r.announced_date_basis==='publication_date_proxy'?' · publication date proxy; event date not verified':''}${r.publishers?.length?' · '+r.publishers.map(esc).join(', '):''}</p>${r.investors.length?`<p>${r.investors.map(i=>esc(i.name)+(i.is_lead?' (lead)':'')).join(', ')}</p>`:''}${r.funding_resolution?.state==='needs_review'?`<p class="warnline">Needs review: ${esc(r.funding_resolution.reason)}${r.funding_resolution.candidate_round_ids?.length?' · Candidate rounds: '+r.funding_resolution.candidate_round_ids.map(esc).join(', '):''}</p>`:''}${r.notes?`<p class="small muted">${esc(r.notes)}</p>`:''}${r.funding_observations?.length?`<details><summary>Source observations (${r.funding_observations.length})</summary><ul>${r.funding_observations.map(o=>`<li>${link(o.source_url,o.publisher||'Source')} · ${esc(o.amount_text||o.amount||'Amount not stated')} ${esc(o.currency||'')} · ${esc(o.evidence_status)} · ${esc(o.match_reason||'')}</li>`).join('')}</ul></details>`:''}${r.conflict_note?`<p class="warnline">${esc(r.conflict_note)}</p>`:''}<p>${link(r.source_url,'Source')}</p></article>`).join(''):'<p class="muted">No funding information found.</p>'}
+  <h3>Funding records and corrections</h3>
+  <p class="note">“Current” refers to the record retained by the evidence model, not whether a company is actively fundraising. Superseded or withdrawn records remain available for traceability and are not counted as current funding records.</p>
+  ${fundingGroups.map(group => `<section class="funding-history-group"><div class="ph"><h3 id="funding-group-${group.key}">${esc(group.title)}</h3><span class="small muted">${group.rounds.length} record${group.rounds.length === 1 ? '' : 's'}</span></div><p class="small muted">${esc(group.note)}</p>${group.rounds.map(r => renderFundingRound(r, group.key === 'historical')).join('')}</section>`).join('') || '<p class="muted">No funding records found.</p>'}
   ${c.sec_filings.length?`<h3>SEC filings</h3>${c.sec_filings.map(f=>`<article class="funding-round"><p>${link(f.filing_url,'Form '+f.form_type+' · '+(f.filing_date||''))} · ${esc(f.issuer_name)} · sold ${f.total_amount_sold==null?'not stated':'$'+Number(f.total_amount_sold).toLocaleString()} of ${f.offering_amount_indefinite?'an indefinite amount':f.total_offering_amount==null?'not stated':'$'+Number(f.total_offering_amount).toLocaleString()}${f.investor_count!=null?' · '+esc(f.investor_count)+' investors':''}</p>${(f.review_flags||[]).map(x=>`<p class="small warnline">${esc(x)}</p>`).join('')}<p class="small muted">${esc(f.disclaimer)}</p></article>`).join('')}`:''}
   ${c.news.length?`<h3>News</h3><div class="news-list">${c.news.map(a=>`<article>${link(a.url,a.title)}<p class="muted small">${esc(a.publisher||'')} · ${esc(a.published_at?new Date(a.published_at+'Z').toLocaleDateString():'')} · ${a.event_types.map(esc).join(', ')||'no event tags'} · tone: ${esc(a.sentiment)}${(a.classification_evidence?.positive_terms||[]).length||(a.classification_evidence?.negative_terms||[]).length?' ('+[...(a.classification_evidence.positive_terms||[]),...(a.classification_evidence.negative_terms||[])].map(esc).join(', ')+')':''}</p></article>`).join('')}</div><p class="note">Tone describes the wording of a headline, not investment quality.</p>`:''}
   <h3>Sources and citations</h3><ul>${c.citations.map(x=>`<li>${esc(x.field)}: ${esc(x.value||'')} ${evBadge(x.evidence_status)}${x.is_estimate?' <span class="b b-plain">algorithmic estimate</span>':''} · ${link(x.source_url,x.publisher||'source')} <span class="small muted">retrieved ${esc(x.retrieved_at?.slice(0,10)||'')}</span></li>`).join('')||'<li>No citations recorded.</li>'}</ul>
