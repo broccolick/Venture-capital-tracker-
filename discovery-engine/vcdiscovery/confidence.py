@@ -10,7 +10,7 @@ from datetime import datetime, time, timedelta
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from .models import Citation, DuplicateCandidate, SecFiling, Startup, utcnow
+from .models import Citation, DuplicateCandidate, SecFiling, SourceObservation, Startup, utcnow
 
 SOURCE_TYPE_POINTS = {"regulatory": 25, "news": 18, "press_release": 14, "video": 12, "analyst": 12, "open_data": 10, "community": 8}
 KEY_FIELDS = ["website", "industry", "description", "hq_city", "founded_year", "funding_stage", "founders"]
@@ -42,14 +42,21 @@ def compute_confidence(session: Session, startup: Startup, stale_after_days: int
     else:
         add("source_quality", 0, "No cited sources")
 
-    # 3. Independent corroboration (distinct publishers, not article count)
-    publishers = {c.publisher for c in citations if c.publisher and c.source_type != "analyst"}
-    if len(publishers) >= 3:
-        add("corroboration", 20, f"{len(publishers)} independent publishers")
-    elif len(publishers) == 2:
-        add("corroboration", 14, "2 independent publishers")
+    # 3. Independent corroboration: count known source origins, not publisher labels.
+    observation_ids = {c.source_observation_id for c in citations if c.source_observation_id is not None}
+    observations = list(session.scalars(select(SourceObservation).where(SourceObservation.id.in_(observation_ids)))) if observation_ids else []
+    independent_origins = {
+        o.origin_group for o in observations
+        if o.source_role == "independent_reporter" and o.origin_group
+    }
+    if len(independent_origins) >= 3:
+        add("corroboration", 20, f"{len(independent_origins)} known independent reporting origins")
+    elif len(independent_origins) == 2:
+        add("corroboration", 14, "2 known independent reporting origins")
+    elif len(independent_origins) == 1:
+        add("corroboration", 0, "One known independent reporting origin; no independent corroboration")
     else:
-        add("corroboration", 0, "Single publisher" if publishers else "No independent publisher")
+        add("corroboration", 0, "No verified independent origin; distinct publisher labels alone are insufficient")
 
     # 4. Freshness
     dates = [c.published_at or c.retrieved_at for c in citations] + [
@@ -74,10 +81,10 @@ def compute_confidence(session: Session, startup: Startup, stale_after_days: int
     add("completeness", 20 * len(filled) / len(KEY_FIELDS), f"{len(filled)}/{len(KEY_FIELDS)} key fields filled")
 
     # 6. Penalties
-    conflicts = sum(1 for r in startup.rounds if r.conflict)
+    conflicts = sum(1 for r in startup.rounds if r.is_current and r.conflict)
     if conflicts:
         add("conflicts", -min(30, 15 * conflicts), f"{conflicts} funding round(s) with conflicting figures")
-    raised_rounds = [r for r in startup.rounds if r.evidence_status not in ("rumor", "target")]
+    raised_rounds = [r for r in startup.rounds if r.is_current and r.evidence_status not in ("rumor", "target")]
     if startup.rounds and not raised_rounds:
         add("unconfirmed_funding", -10, "Funding information is only rumoured or a target")
     open_dups = session.scalar(select(func.count(DuplicateCandidate.id)).where(
