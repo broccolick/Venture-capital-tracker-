@@ -32,7 +32,7 @@ from .models import (
     Startup,
     utcnow,
 )
-from .resolution import find_existing, record_duplicate, resolve_or_create, similar_names, similar_startups
+from .resolution import record_duplicate, resolve_or_create, similar_names, similar_startups
 from .sources import build_sources
 from .sources.base import FormDItem, NewsItem
 from .sources.reddit import RedditSource
@@ -388,9 +388,7 @@ def _ingest_hn(session, item: NewsItem, article: NewsArticle, settings: Settings
     domain = company_domain(item.url)
     if ext.kind == "show_hn" and (points < settings.hn_min_points or not domain):
         return  # side projects and repo links are kept as articles but not promoted to companies
-    # Track which fields may be enriched by this community record before resolving the company.
-    existing_before, _ = find_existing(session, ext.company_name, website=item.url if domain else None)
-    missing_website_before = bool(existing_before and not existing_before.website and domain)
+    # Do not silently populate a company description: fill it only with cited evidence.
     res = resolve_or_create(session, ext.company_name, website=item.url if domain else None,
                             discovered_via=item.source_key, defaults={})
     startup = res.startup
@@ -398,13 +396,6 @@ def _ingest_hn(session, item: NewsItem, article: NewsArticle, settings: Settings
         stats["startups_created"] += 1
         matcher.add(startup)
         startup.primary_source_url = metrics.get("discussion_url") or article.url
-    if startup.website and (res.created or missing_website_before):
-        add_citation(
-            session, startup, "website", startup.website, "community_sourced", key=f"hn-website:{metrics.get('hn_id', article.id)}",
-            source_type=item.source_type, publisher=item.publisher,
-            url=metrics.get("discussion_url") or article.url, article=article, published_at=item.published_at,
-            is_estimate=True, note="Website URL linked from a Hacker News submission; verify ownership.",
-        )
     if not startup.description and ext.tagline:
         startup.description = ext.tagline
         add_citation(
