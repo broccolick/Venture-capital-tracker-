@@ -2,6 +2,7 @@
 deduplicate, and refresh confidence scores. One failing source never stops the others."""
 from __future__ import annotations
 
+import hashlib
 import re
 import traceback
 from datetime import date, datetime, timedelta
@@ -25,12 +26,13 @@ from .models import (
     JobLock,
     JobRun,
     NewsArticle,
+    SourceObservation,
     SecFiling,
     ReviewEvent,
     Startup,
     utcnow,
 )
-from .resolution import record_duplicate, resolve_or_create, similar_names, similar_startups
+from .resolution import find_existing, record_duplicate, resolve_or_create, similar_names, similar_startups
 from .sources import build_sources
 from .sources.base import FormDItem, NewsItem
 from .sources.reddit import RedditSource
@@ -77,39 +79,82 @@ def release_lock(session: Session, name: str) -> None:
 
 # --------------------------------------------------------------------------- helpers
 
+def _source_fingerprint(
+    source_key: str, source_type: str, publisher: str | None, source_url: str,
+    title: str, summary: str | None, published_at: datetime | None,
+) -> str:
+    """Fingerprint source metadata relevant to extracting or interpreting a claim."""
+    parts = (
+        source_key or "", source_type or "", publisher or "", source_url or "",
+        title or "", summary or "", published_at.isoformat() if published_at else "",
+    )
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+
+
+def _record_source_observation(
+    session: Session, article: NewsArticle, *, source_key: str, source_type: str,
+    publisher: str | None, source_url: str, title: str, summary: str | None,
+    published_at: datetime | None, retrieved_at: datetime, fingerprint: str,
+    revision_number: int,
+) -> SourceObservation:
+    observation = SourceObservation(
+        article_id=article.id, revision_number=revision_number, source_key=source_key,
+        source_type=source_type, publisher=publisher, source_url=source_url, title=title,
+        summary=summary, published_at=published_at, retrieved_at=retrieved_at, fingerprint=fingerprint,
+    )
+    session.add(observation)
+    session.flush()
+    return observation
+
+
+def _latest_source_observation(session: Session, article_id: int) -> SourceObservation | None:
+    return session.scalar(select(SourceObservation).where(
+        SourceObservation.article_id == article_id
+    ).order_by(SourceObservation.revision_number.desc()).limit(1))
+
+
+def _observation_for_article(session: Session, article: NewsArticle | None) -> SourceObservation | None:
+    return _latest_source_observation(session, article.id) if article and article.id is not None else None
+
+
 def add_citation(session: Session, startup: Startup, field: str, value: str | None, status: str, *, key: str,
                   source_type: str | None, publisher: str | None, url: str | None, article: NewsArticle | None = None,
                   filing: SecFiling | None = None, published_at: datetime | None = None, is_estimate: bool = False,
                   note: str | None = None) -> None:
-    dedupe = f"{startup.id}:{field}:{key}"
+    observation = _observation_for_article(session, article)
+    dedupe = (f"{startup.id}:{field}:observation:{observation.id}"
+              if observation else f"{startup.id}:{field}:{key}")
     if session.scalar(select(exists().where(Citation.dedupe_key == dedupe))):
         return
     session.add(Citation(
         startup_id=startup.id, field_name=field, value_text=value, evidence_status=status, is_estimate=is_estimate,
         source_type=source_type, publisher=publisher, source_url=url, article_id=article.id if article else None,
-        sec_filing_id=filing.id if filing else None, published_at=published_at, note=note, dedupe_key=dedupe,
+        source_observation_id=observation.id if observation else None,
+        sec_filing_id=filing.id if filing else None, published_at=published_at, note=note,
+        dedupe_key=dedupe, is_current=True,
     ))
-
 
 def _add_signal(session: Session, startup: Startup, signal_type: str, key: str, *, source_key: str, detail: str,
                 url: str | None, observed_at: datetime | None, article: NewsArticle | None = None,
                 filing: SecFiling | None = None) -> bool:
-    if session.scalar(select(exists().where(DiscoverySignal.dedupe_key == key))):
+    observation = _observation_for_article(session, article)
+    dedupe = f"{key}:observation:{observation.id}" if observation else key
+    if session.scalar(select(exists().where(DiscoverySignal.dedupe_key == dedupe))):
         return False
     session.add(DiscoverySignal(
         startup_id=startup.id, signal_type=signal_type, source_key=source_key, detail=detail, source_url=url,
-        observed_at=observed_at, article_id=article.id if article else None, sec_filing_id=filing.id if filing else None,
-        dedupe_key=key,
+        observed_at=observed_at, article_id=article.id if article else None,
+        source_observation_id=observation.id if observation else None,
+        sec_filing_id=filing.id if filing else None, dedupe_key=dedupe, is_current=True,
     ))
     return True
-
 
 def _mention(session: Session, article: NewsArticle, startup: Startup, method: str) -> None:
     if not session.scalar(select(exists().where(
             ArticleMention.article_id == article.id, ArticleMention.startup_id == startup.id))):
         session.add(ArticleMention(article_id=article.id, startup_id=startup.id, match_method=method))
     when = article.published_at or article.retrieved_at
-    if startup.latest_news_date is None or (when and when > startup.latest_news_date):
+    if startup.latest_news_date is None or (when and when >= startup.latest_news_date):
         startup.latest_news_title, startup.latest_news_url, startup.latest_news_date = article.title, article.url, when
 
 
@@ -151,29 +196,103 @@ class NameMatcher:
 def ingest_news_item(session: Session, item: NewsItem, settings: Settings, matcher: NameMatcher) -> dict:
     stats = {"new": 0, "duplicate": 0, "startups_created": 0}
     url = canonical_url(item.url)
-    if not url or session.scalar(select(exists().where(NewsArticle.url == url))):
+    if not url:
         stats["duplicate"] = 1
         return stats
-    fp = title_fingerprint(item.title)
-    when = item.published_at or utcnow()
-    syndicated = session.scalar(select(NewsArticle).where(
-        NewsArticle.title_fingerprint == fp, NewsArticle.duplicate_of_id.is_(None),
-        NewsArticle.published_at.between(when - SYNDICATION_WINDOW, when + SYNDICATION_WINDOW)))
-    cls = classify_text(item.title, item.summary)
-    article = NewsArticle(
-        source_key=item.source_key, source_type=item.source_type, publisher=item.publisher, url=url, title=item.title,
-        summary=item.summary, published_at=item.published_at, title_fingerprint=fp,
-        duplicate_of_id=syndicated.id if syndicated else None, event_types=cls["event_types"],
-        sentiment=cls["sentiment"], sentiment_score=cls["sentiment_score"], classification_evidence=cls["evidence"],
-        community_metrics=item.community_metrics,
+
+    now = utcnow()
+    fingerprint = _source_fingerprint(
+        item.source_key, item.source_type, item.publisher, url, item.title, item.summary, item.published_at,
     )
-    session.add(article)
-    session.flush()
-    stats["new"] = 1
+    article = session.scalar(select(NewsArticle).where(NewsArticle.url == url))
+    if article:
+        previous = _latest_source_observation(session, article.id)
+        if previous is None:
+            # Backfill a baseline for rows captured before source observations were introduced.
+            baseline_fp = _source_fingerprint(
+                article.source_key, article.source_type, article.publisher, article.url, article.title,
+                article.summary, article.published_at,
+            )
+            previous = _record_source_observation(
+                session, article, source_key=article.source_key, source_type=article.source_type,
+                publisher=article.publisher, source_url=article.url, title=article.title, summary=article.summary,
+                published_at=article.published_at, retrieved_at=article.retrieved_at or now,
+                fingerprint=baseline_fp, revision_number=1,
+            )
+        if previous.fingerprint == fingerprint:
+            # Update last-checked time only; unchanged fetches are not new claim evidence.
+            article.retrieved_at = now
+            stats["duplicate"] = 1
+            return stats
+
+        _record_source_observation(
+            session, article, source_key=item.source_key, source_type=item.source_type, publisher=item.publisher,
+            source_url=url, title=item.title, summary=item.summary, published_at=item.published_at,
+            retrieved_at=now, fingerprint=fingerprint, revision_number=previous.revision_number + 1,
+        )
+        # Preserve old rows for audit but remove them from the current profile view.
+        for citation in session.scalars(select(Citation).where(
+                Citation.article_id == article.id, Citation.is_current.is_(True))):
+            citation.is_current = False
+        for signal in session.scalars(select(DiscoverySignal).where(
+                DiscoverySignal.article_id == article.id, DiscoverySignal.is_current.is_(True))):
+            signal.is_current = False
+
+        old_startups = {mention.startup.id: mention.startup for mention in list(article.mentions)}
+        for mention in list(article.mentions):
+            session.delete(mention)
+        session.flush()
+        for startup in old_startups.values():
+            if startup.latest_news_url == article.url:
+                latest_other = session.scalar(
+                    select(NewsArticle).join(ArticleMention, ArticleMention.article_id == NewsArticle.id)
+                    .where(ArticleMention.startup_id == startup.id, NewsArticle.id != article.id,
+                           NewsArticle.duplicate_of_id.is_(None))
+                    .order_by(NewsArticle.published_at.desc().nulls_last()).limit(1)
+                )
+                startup.latest_news_title = latest_other.title if latest_other else None
+                startup.latest_news_url = latest_other.url if latest_other else None
+                startup.latest_news_date = ((latest_other.published_at or latest_other.retrieved_at)
+                                            if latest_other else None)
+
+        cls = classify_text(item.title, item.summary)
+        article.source_key, article.source_type, article.publisher = item.source_key, item.source_type, item.publisher
+        article.title, article.summary, article.published_at = item.title, item.summary, item.published_at
+        article.retrieved_at, article.title_fingerprint = now, title_fingerprint(item.title)
+        article.event_types, article.sentiment = cls["event_types"], cls["sentiment"]
+        article.sentiment_score, article.classification_evidence = cls["sentiment_score"], cls["evidence"]
+        article.community_metrics = item.community_metrics
+        article.duplicate_of_id = None
+        stats["new"] = 1  # records a new source version, not another canonical article
+    else:
+        fp = title_fingerprint(item.title)
+        article = NewsArticle(
+            source_key=item.source_key, source_type=item.source_type, publisher=item.publisher, url=url,
+            title=item.title, summary=item.summary, published_at=item.published_at, retrieved_at=now,
+            title_fingerprint=fp, community_metrics=item.community_metrics,
+        )
+        cls = classify_text(item.title, item.summary)
+        article.event_types, article.sentiment = cls["event_types"], cls["sentiment"]
+        article.sentiment_score, article.classification_evidence = cls["sentiment_score"], cls["evidence"]
+        session.add(article)
+        session.flush()
+        _record_source_observation(
+            session, article, source_key=item.source_key, source_type=item.source_type, publisher=item.publisher,
+            source_url=url, title=item.title, summary=item.summary, published_at=item.published_at,
+            retrieved_at=now, fingerprint=fingerprint, revision_number=1,
+        )
+        stats["new"] = 1
+
+    fp = title_fingerprint(item.title)
+    when = item.published_at or now
+    syndicated = session.scalar(select(NewsArticle).where(
+        NewsArticle.url != url, NewsArticle.title_fingerprint == fp, NewsArticle.duplicate_of_id.is_(None),
+        NewsArticle.published_at.between(when - SYNDICATION_WINDOW, when + SYNDICATION_WINDOW),
+    ))
     if syndicated:
-        # Same story republished: link it to the same companies but do not count it as new evidence.
-        for m in syndicated.mentions:
-            _mention(session, article, m.startup, "syndicated_copy")
+        article.duplicate_of_id = syndicated.id
+        for mention in syndicated.mentions:
+            _mention(session, article, mention.startup, "syndicated_copy")
         stats["duplicate"] = 1
         return stats
 
@@ -194,7 +313,6 @@ def ingest_news_item(session: Session, item: NewsItem, settings: Settings, match
     stats["touched"] = touched
     return stats
 
-
 def _ingest_funding_news(session, item: NewsItem, article: NewsArticle, stats, touched, matcher) -> None:
     ext = extract_funding(item.title, item.summary, item.source_type)
     if not ext:
@@ -214,6 +332,10 @@ def _ingest_funding_news(session, item: NewsItem, article: NewsArticle, stats, t
                           note=f"Estimated from headline wording ('{ext.descriptor or item.title[:60]}')")
     if not startup.industry and ext.industry_hint:
         startup.industry = ext.industry_hint
+        add_citation(session, startup, "industry", ext.industry_hint, "reported", key=f"a{article.id}",
+                      source_type=item.source_type, publisher=item.publisher, url=article.url, article=article,
+                      published_at=item.published_at, is_estimate=True,
+                      note=f"Estimated from headline wording ('{ext.descriptor or item.title[:60]}')")
     touched.add(startup.id)
     _mention(session, article, startup, "extracted_subject")
     # Publication time is not the same as the funding event date. Use it only as an
@@ -266,15 +388,31 @@ def _ingest_hn(session, item: NewsItem, article: NewsArticle, settings: Settings
     domain = company_domain(item.url)
     if ext.kind == "show_hn" and (points < settings.hn_min_points or not domain):
         return  # side projects and repo links are kept as articles but not promoted to companies
+    # Track which fields may be enriched by this community record before resolving the company.
+    existing_before, _ = find_existing(session, ext.company_name, website=item.url if domain else None)
+    missing_website_before = bool(existing_before and not existing_before.website and domain)
     res = resolve_or_create(session, ext.company_name, website=item.url if domain else None,
-                            discovered_via=item.source_key, defaults={"description": ext.tagline})
+                            discovered_via=item.source_key, defaults={})
     startup = res.startup
     if res.created:
         stats["startups_created"] += 1
         matcher.add(startup)
         startup.primary_source_url = metrics.get("discussion_url") or article.url
-    elif not startup.description and ext.tagline:
+    if startup.website and (res.created or missing_website_before):
+        add_citation(
+            session, startup, "website", startup.website, "community_sourced", key=f"hn-website:{metrics.get('hn_id', article.id)}",
+            source_type=item.source_type, publisher=item.publisher,
+            url=metrics.get("discussion_url") or article.url, article=article, published_at=item.published_at,
+            is_estimate=True, note="Website URL linked from a Hacker News submission; verify ownership.",
+        )
+    if not startup.description and ext.tagline:
         startup.description = ext.tagline
+        add_citation(
+            session, startup, "description", ext.tagline, "community_sourced", key=f"hn:{metrics.get('hn_id', article.id)}",
+            source_type=item.source_type, publisher=item.publisher,
+            url=metrics.get("discussion_url") or article.url, article=article, published_at=item.published_at,
+            note="Description inferred from a Hacker News submission tagline; verify before relying on it.",
+        )
     touched.add(startup.id)
     _mention(session, article, startup, "hn_title")
     discussion = metrics.get("discussion_url")

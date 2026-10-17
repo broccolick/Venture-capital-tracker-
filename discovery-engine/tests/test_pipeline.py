@@ -8,6 +8,8 @@ from vcdiscovery import db
 from vcdiscovery.funding import record_round
 from vcdiscovery.models import (
     ArticleMention,
+    Citation,
+    SourceObservation,
     DiscoverySignal,
     DuplicateCandidate,
     FundingRound,
@@ -295,3 +297,93 @@ def test_similar_names_create_review_item_not_merge(settings):
         assert s.scalar(select(func.count(Startup.id))) == 2
         dup = s.scalar(select(DuplicateCandidate))
         assert dup is not None and dup.status == "open"
+
+
+
+def test_same_url_revision_preserves_old_observation_and_reassesses_citations(settings):
+    url = "https://a.example/corrected"
+    ingest(settings, [news("Acme Robotics raises $12M Series A", url, publisher="Outlet A")])
+    ingest(settings, [news("Acme Robotics raises $20M Series A", url, publisher="Outlet A")])
+
+    with db.session_scope() as s:
+        article = s.scalar(select(NewsArticle).where(NewsArticle.url == url))
+        observations = list(s.scalars(
+            select(SourceObservation).where(SourceObservation.article_id == article.id)
+            .order_by(SourceObservation.revision_number)
+        ))
+        assert len(s.scalars(select(NewsArticle)).all()) == 1
+        assert [o.revision_number for o in observations] == [1, 2]
+        assert [o.title for o in observations] == [
+            "Acme Robotics raises $12M Series A", "Acme Robotics raises $20M Series A"
+        ]
+        citations = list(s.scalars(select(Citation).where(
+            Citation.article_id == article.id, Citation.field_name == "funding_round"
+        ).order_by(Citation.id)))
+        assert len(citations) == 2
+        assert [c.is_current for c in citations] == [False, True]
+        assert [c.source_observation_id for c in citations] == [observations[0].id, observations[1].id]
+        assert "$20M" in citations[1].value_text
+
+
+def test_same_url_unchanged_fetch_does_not_create_a_revision_or_new_evidence(settings):
+    url = "https://a.example/unchanged"
+    item = news("Acme Robotics raises $12M Series A", url, publisher="Outlet A")
+    ingest(settings, [item])
+    with db.session_scope() as s:
+        before_observations = s.scalar(select(func.count(SourceObservation.id)))
+        before_citations = s.scalar(select(func.count(Citation.id)))
+        before_signals = s.scalar(select(func.count(DiscoverySignal.id)))
+
+    result = ingest(settings, [item])
+    assert result["duplicate"] == 1
+    with db.session_scope() as s:
+        assert s.scalar(select(func.count(SourceObservation.id))) == before_observations
+        assert s.scalar(select(func.count(Citation.id))) == before_citations
+        assert s.scalar(select(func.count(DiscoverySignal.id))) == before_signals
+
+
+def test_existing_startup_industry_enrichment_is_cited(settings):
+    with db.session_scope() as s:
+        startup = Startup(name="Acme Robotics", normalized_name="acme robotics",
+                          review_status="Needs Verification", flags=[], is_demo=False)
+        s.add(startup)
+        s.flush()
+        startup_id = startup.id
+
+    ingest(settings, [news(
+        "Climate tech startup Acme Robotics raises $12M Series A",
+        "https://news.example.com/acme-climate-round", publisher="Outlet A",
+    )])
+
+    with db.session_scope() as s:
+        startup = s.get(Startup, startup_id)
+        assert startup.industry == "Climate Technology"
+        citation = s.scalar(select(Citation).where(
+            Citation.startup_id == startup_id, Citation.field_name == "industry", Citation.is_current.is_(True)
+        ))
+        assert citation is not None and citation.is_estimate is True
+        assert citation.source_observation_id is not None
+        assert "Estimated from headline wording" in citation.note
+
+
+def test_hacker_news_tagline_description_and_website_enrichment_are_cited(settings):
+    item = NewsItem(
+        source_key="hackernews", source_type="community", publisher="Hacker News",
+        url="https://newco.example/", title="Show HN: NewCo - A simple tool for climate founders",
+        summary=None, published_at=datetime(2026, 10, 2, 9),
+        community_metrics={"hn_id": "12345", "points": 100, "comments": 5,
+                           "discussion_url": "https://news.ycombinator.com/item?id=12345"},
+    )
+    ingest(settings, [item])
+
+    with db.session_scope() as s:
+        startup = s.scalar(select(Startup).where(Startup.name == "NewCo"))
+        assert startup is not None
+        current_fields = {
+            c.field_name: c for c in s.scalars(select(Citation).where(
+                Citation.startup_id == startup.id, Citation.is_current.is_(True)
+            ))
+        }
+        assert startup.description == "A simple tool for climate founders"
+        assert current_fields["description"].source_observation_id is not None
+        assert current_fields["website"].source_observation_id is not None

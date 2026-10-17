@@ -22,7 +22,7 @@ def compute_confidence(session: Session, startup: Startup, stale_after_days: int
     def add(component: str, points: float, why: str) -> None:
         parts.append({"component": component, "points": round(points, 1), "explanation": why})
 
-    citations = list(session.scalars(select(Citation).where(Citation.startup_id == startup.id)))
+    citations = list(session.scalars(select(Citation).where(Citation.startup_id == startup.id, Citation.is_current.is_(True))))
     filings = list(session.scalars(select(SecFiling).where(
         SecFiling.startup_id == startup.id, SecFiling.match_status.in_(["auto_matched", "created", "confirmed"]))))
 

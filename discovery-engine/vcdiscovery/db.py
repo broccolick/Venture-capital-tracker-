@@ -4,7 +4,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Iterator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -52,10 +52,36 @@ def get_engine() -> Engine:
 
 
 def init_db() -> None:
-    """Create any missing tables. Safe to run repeatedly."""
+    """Create missing tables and apply safe additive migrations to persisted databases."""
     from . import models  # noqa: F401  (registers the tables)
 
-    Base.metadata.create_all(get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+    _ensure_additive_columns(engine)
+
+
+def _ensure_additive_columns(engine: Engine) -> None:
+    """Upgrade older persisted databases with nullable provenance links and current-state flags."""
+    additions = {
+        "citations": {
+            "source_observation_id": "INTEGER REFERENCES source_observations(id) ON DELETE SET NULL",
+            "is_current": "BOOLEAN NOT NULL DEFAULT TRUE",
+        },
+        "discovery_signals": {
+            "source_observation_id": "INTEGER REFERENCES source_observations(id) ON DELETE SET NULL",
+            "is_current": "BOOLEAN NOT NULL DEFAULT TRUE",
+        },
+    }
+    existing_tables = set(inspect(engine).get_table_names())
+    for table, columns in additions.items():
+        if table not in existing_tables:
+            continue
+        existing_columns = {column["name"] for column in inspect(engine).get_columns(table)}
+        for column, ddl in columns.items():
+            if column not in existing_columns:
+                with engine.begin() as connection:
+                    connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+                existing_columns.add(column)
 
 
 @contextmanager

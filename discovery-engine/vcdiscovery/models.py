@@ -154,6 +154,30 @@ class NewsArticle(Base):
     mentions: Mapped[list["ArticleMention"]] = relationship(back_populates="article", cascade="all, delete-orphan")
 
 
+class SourceObservation(Base):
+    """Immutable snapshot of a source record when material content first appears or changes.
+
+    NewsArticle remains the latest view used by existing readers; this table preserves prior
+    versions for traceability without storing full article text.
+    """
+
+    __tablename__ = "source_observations"
+    __table_args__ = (UniqueConstraint("article_id", "revision_number"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("news_articles.id", ondelete="CASCADE"), index=True)
+    revision_number: Mapped[int] = mapped_column(Integer)
+    source_key: Mapped[str] = mapped_column(String(80))
+    source_type: Mapped[str] = mapped_column(String(40))
+    publisher: Mapped[str | None] = mapped_column(String(120))
+    source_url: Mapped[str] = mapped_column(String(1000))
+    title: Mapped[str] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+
+
 class ArticleMention(Base):
     __tablename__ = "article_mentions"
     __table_args__ = (UniqueConstraint("article_id", "startup_id"),)
@@ -272,6 +296,8 @@ class DiscoverySignal(Base):
     signal_type: Mapped[str] = mapped_column(String(60), index=True)
     source_key: Mapped[str] = mapped_column(String(80))
     article_id: Mapped[int | None] = mapped_column(ForeignKey("news_articles.id", ondelete="SET NULL"))
+    source_observation_id: Mapped[int | None] = mapped_column(ForeignKey("source_observations.id", ondelete="SET NULL"))
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True)
     sec_filing_id: Mapped[int | None] = mapped_column(ForeignKey("sec_filings.id", ondelete="SET NULL"))
     detail: Mapped[str | None] = mapped_column(Text)
     source_url: Mapped[str | None] = mapped_column(String(1000))
@@ -297,6 +323,8 @@ class Citation(Base):
     publisher: Mapped[str | None] = mapped_column(String(120))
     source_url: Mapped[str | None] = mapped_column(String(1000))
     article_id: Mapped[int | None] = mapped_column(ForeignKey("news_articles.id", ondelete="SET NULL"))
+    source_observation_id: Mapped[int | None] = mapped_column(ForeignKey("source_observations.id", ondelete="SET NULL"))
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True)
     sec_filing_id: Mapped[int | None] = mapped_column(ForeignKey("sec_filings.id", ondelete="SET NULL"))
     published_at: Mapped[datetime | None] = mapped_column(DateTime)
     retrieved_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
