@@ -63,6 +63,10 @@ def init_db() -> None:
 def _ensure_additive_columns(engine: Engine) -> None:
     """Upgrade older persisted databases with nullable provenance links and current-state flags."""
     additions = {
+        "source_observations": {
+            "origin_group": "VARCHAR(160)",
+            "source_role": "VARCHAR(40)",
+        },
         "citations": {
             "source_observation_id": "INTEGER REFERENCES source_observations(id) ON DELETE SET NULL",
             "is_current": "BOOLEAN NOT NULL DEFAULT TRUE",
@@ -70,6 +74,10 @@ def _ensure_additive_columns(engine: Engine) -> None:
         "discovery_signals": {
             "source_observation_id": "INTEGER REFERENCES source_observations(id) ON DELETE SET NULL",
             "is_current": "BOOLEAN NOT NULL DEFAULT TRUE",
+        },
+        "funding_rounds": {
+            "is_current": "BOOLEAN NOT NULL DEFAULT TRUE",
+            "superseded_by_round_id": "INTEGER REFERENCES funding_rounds(id) ON DELETE SET NULL",
         },
     }
     existing_tables = set(inspect(engine).get_table_names())

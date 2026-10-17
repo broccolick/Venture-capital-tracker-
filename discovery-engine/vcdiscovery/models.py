@@ -176,6 +176,8 @@ class SourceObservation(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime)
     retrieved_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    origin_group: Mapped[str | None] = mapped_column(String(160), index=True)
+    source_role: Mapped[str | None] = mapped_column(String(40))
 
 
 class ArticleMention(Base):
@@ -227,11 +229,13 @@ class FundingRound(Base):
     source_url: Mapped[str | None] = mapped_column(String(1000))
     article_id: Mapped[int | None] = mapped_column(ForeignKey("news_articles.id", ondelete="SET NULL"))
     sec_filing_id: Mapped[int | None] = mapped_column(ForeignKey("sec_filings.id", ondelete="SET NULL"))
-    publishers: Mapped[list | None] = mapped_column(JSON, default=list)  # independent outlets citing it
+    publishers: Mapped[list | None] = mapped_column(JSON, default=list)  # attribution only; not proof of independence
     conflict: Mapped[bool] = mapped_column(Boolean, default=False)
     conflict_note: Mapped[str | None] = mapped_column(Text)
     notes: Mapped[str | None] = mapped_column(Text)
     extra: Mapped[dict | None] = mapped_column(JSON)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    superseded_by_round_id: Mapped[int | None] = mapped_column(ForeignKey("funding_rounds.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
