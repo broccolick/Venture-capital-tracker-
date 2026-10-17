@@ -130,6 +130,26 @@
     return [...out].sort(by);
   }
 
+  /* Keep current source-backed funding records separate from superseded history. */
+  function fundingRecordGroups(company) {
+    const current = Array.isArray(company?.funding_rounds) ? company.funding_rounds : [];
+    const historical = Array.isArray(company?.funding_history) ? company.funding_history : [];
+    return [
+      {
+        key: 'current',
+        title: 'Current records',
+        note: 'These are the records currently retained by VentureScout. “Current” does not mean the company is actively fundraising.',
+        rounds: current,
+      },
+      {
+        key: 'historical',
+        title: 'Superseded or withdrawn records',
+        note: 'Retained for traceability after a source correction or withdrawal; not treated as current funding records.',
+        rounds: historical,
+      },
+    ].filter(group => group.rounds.length > 0);
+  }
+
   function searchMarket(companies, q) {
     const s = (q || '').trim().toLowerCase();
     if (!s) return companies;
@@ -137,5 +157,5 @@
   }
 
   root.VentureScout = { STORAGE_KEY, STAGES, CONTRIBUTOR_PHOTO_MAX_BYTES, validateContributor, formatMoney, mapPoints, filterMapPoints, safeURL, companyIdentity, validateCompany, loadSaved, writeSaved,
-    upsertCompany, removeCompany, importBackup, filterDiscovery, searchMarket };
+    upsertCompany, removeCompany, importBackup, filterDiscovery, fundingRecordGroups, searchMarket };
 })(typeof window !== 'undefined' ? window : globalThis);
