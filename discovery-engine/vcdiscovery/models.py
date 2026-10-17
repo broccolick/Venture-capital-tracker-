@@ -45,6 +45,7 @@ EVIDENCE_STATUSES = {
     "analyst_entered": "Entered or imported by an analyst; check the cited source.",
     "target": "Amount the company is seeking or aims to raise. Not money raised.",
     "rumor": "Unconfirmed report (e.g. 'in talks', 'reportedly'). Never treated as raised.",
+    "community_sourced": "From a community-edited open database (Wikidata). Useful context; check the linked item.",
 }
 # Statuses that may be counted as capital actually raised.
 RAISED_STATUSES = {"confirmed", "company_announced", "reported", "analyst_entered"}
@@ -135,7 +136,7 @@ class NewsArticle(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     source_key: Mapped[str] = mapped_column(String(80), index=True)
-    source_type: Mapped[str] = mapped_column(String(40))  # news | press_release | community
+    source_type: Mapped[str] = mapped_column(String(40))  # news | press_release | video | community
     publisher: Mapped[str | None] = mapped_column(String(120))
     url: Mapped[str] = mapped_column(String(1000), unique=True)
     title: Mapped[str] = mapped_column(Text)
@@ -395,3 +396,16 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
     value: Mapped[dict] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class GeocodeCache(Base):
+    """Coordinates of a place name, looked up once on OpenStreetMap Nominatim (for the website's map)."""
+    __tablename__ = "geocode_cache"
+
+    query: Mapped[str] = mapped_column(String(300), primary_key=True)  # normalised place text
+    status: Mapped[str] = mapped_column(String(20))  # found | not_found
+    lat: Mapped[float | None] = mapped_column(Float)
+    lon: Mapped[float | None] = mapped_column(Float)
+    place: Mapped[str | None] = mapped_column(String(200))  # e.g. "San Francisco, United States"
+    country: Mapped[str | None] = mapped_column(String(120))
+    looked_up_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

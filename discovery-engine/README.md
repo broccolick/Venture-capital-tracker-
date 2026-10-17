@@ -71,7 +71,8 @@ one-time setup. Locally, preview the result with `npm run dev` in `vc-investment
 | Command | What it does |
 |---|---|
 | `init-db` | Create database tables (safe to repeat) |
-| `run [--source KEY] [--group news\|funding\|community\|regulatory]` | Run discovery now |
+| `run [--source KEY] [--group news\|funding\|community\|video\|regulatory]` | Run discovery now |
+| `enrich [--limit N]` | Fill missing company facts from Wikidata |
 | `check-sources [--include-disabled]` | Test every source's URL; nothing is saved |
 | `serve [--scheduler] [--port 8000]` | Start the API |
 | `schedule` | Run scheduled jobs in this terminal (Ctrl+C stops) |
@@ -80,6 +81,8 @@ one-time setup. Locally, preview the result with `npm run dev` in `vc-investment
 | `import-csv FILE` | Import companies from CSV (only `name`/`company_name` is required) |
 | `export-csv [DIR]` | Write `startups.csv`, `funding_rounds.csv`, `sec_filings.csv` |
 | `export-site [DIR]` | Write the website data files (discovery.json, news.json, status.json) |
+| `geocode [--max-new 60]` | Look up company cities on OpenStreetMap and write the map's `places.json` |
+| `export-hall [DIR]` | Write approved Hall of contributors requests (needs `GITHUB_TOKEN`, `GITHUB_REPOSITORY`) |
 | `print-schema [--postgres]` | Print the SQL schema |
 | `status` | Record counts and the last 10 jobs |
 
@@ -108,11 +111,15 @@ Configured in `config/sources.json`. Set `"enabled": true/false` to switch a sou
 | Source | Access | Status |
 |---|---|---|
 | Hacker News (Algolia HN API) | Free, no key | Enabled |
+| Wikidata (official MediaWiki API) | Free, public domain (CC0); identified User-Agent, `maxlag`, one request at a time | Enabled (enrichment) |
 | SEC EDGAR Form D (daily index + `primary_doc.xml`) | Free; requires User-Agent with your email; ≤10 req/s (we use ≤4) | Enabled once `VCD_SEC_USER_AGENT` is set |
 | TechCrunch (Venture, Startups), Crunchbase News, FinSMEs, EU-Startups, VentureBeat | Public RSS feeds; headline, link and ≤500-char summary only | Enabled |
 | PR Newswire (venture capital list) | Public RSS of press releases (labelled *company_announced*) | Enabled |
 | Sifted, Business Wire | Feed URL must be confirmed/chosen by you | Disabled |
-| Product Hunt, Reddit, YC directory | Need API approval/terms review, or have no public API | Not implemented (Phase 4) |
+| Reddit (official Data API, read-only) | Free for non-commercial use; needs a registered "script" app and Reddit's approval | Enabled once `VCD_REDDIT_*` credentials are set |
+| YouTube channel feeds (Y Combinator, TechCrunch, a16z, Bloomberg Technology, This Week in Startups, CNBC Television) | Public RSS feeds, no key; title, link and short description only | Enabled |
+| YouTube search (official YouTube Data API v3) | Free Google Cloud API key; 4 searches a day (400 of 10,000 free quota units) | Disabled (optional) |
+| Product Hunt, YC directory | Need API approval/terms review, or have no public API | Not implemented (Phase 4) |
 
 **Rules the code follows:** it never downloads full articles, never bypasses paywalls, logins,
 CAPTCHAs or rate limits, identifies itself, waits between requests, and honours `Retry-After`.
@@ -135,6 +142,7 @@ source that fails. Review each publisher's terms if you plan anything beyond per
 | `reported` | One news outlet | Yes |
 | `target` | "aims to raise", "seeks"… | No |
 | `rumor` | "reportedly", "in talks", "sources say"… Repetition never upgrades a rumour | No |
+| `community_sourced` | Company facts from Wikidata (website, founded, founders, HQ, industry), never funding | n/a |
 
 Different amounts for the same round within 60 days → both rounds flagged `conflict` and the company flagged `conflicting_funding`.
 Different currencies are never converted or summed.
@@ -146,6 +154,56 @@ Different currencies are never converted or summed.
 review item in `GET /api/duplicates`. Fuzzy matches are never merged automatically.
 Articles: same cleaned URL = same article. Same headline within 3 days = syndicated copy, which is stored
 but does not count as corroboration.
+
+### Wikidata enrichment
+`enrich` looks up companies (newest first, 60 per run) on Wikidata and fills **only empty** fields: website,
+founding year, founders, headquarters, country, industry and description. A Wikidata item is accepted only if
+its official website matches the company's known website, or, when no website is known, if it is the only
+company-like item with exactly that name. Each filled field is cited as `community_sourced` with a link to the
+item. Matched companies are not looked up again; unmatched ones are re-checked after 30 days.
+
+### Reddit
+With credentials set, each run reads the newest posts in r/startups, r/SaaS, r/venturecapital, r/SideProject,
+r/ycombinator and r/EntrepreneurRideAlong (list in `config/sources.json`). Posts below 5 points, NSFW and removed
+posts are skipped. Only the title, link, score, comment count and subreddit are stored (no post text, no
+usernames). Posts link to companies you already track (by website link or exact name) and count towards community
+attention; Reddit never creates new companies. Posts stored in the last 60 days are re-checked each run and
+deleted from the database if they were deleted or removed on Reddit.
+
+**Setup:** sign in to Reddit, accept the Data API Terms (request access if Reddit asks), create a **script** app
+at https://www.reddit.com/prefs/apps, then set `VCD_REDDIT_CLIENT_ID`, `VCD_REDDIT_CLIENT_SECRET` and
+`VCD_REDDIT_USERNAME` in `.env` (locally) or the `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` and `REDDIT_USERNAME`
+repository secrets (GitHub). Until then the Data status page shows Reddit as "needs configuration".
+
+### YouTube
+Two parts, both free:
+
+* **Channel feeds** (no key): each chosen channel's public RSS feed (list in `config/sources.json`). Video
+  titles are read like news headlines: "Acme raises $10M Series A" from TechCrunch's channel can create a company
+  and a `reported` funding round, cited as a `video` source. The publisher is the channel owner, so a TechCrunch
+  video and a TechCrunch article never count as two independent sources.
+* **Search** (free API key): the YouTube Data API searches for the phrases in `config/sources.json` (videos from
+  the last 48 hours). Results can come from any uploader, so, like Reddit, they only link to companies you already
+  track and never create new ones.
+
+Videos are never downloaded and captions are never read; only the title, link, channel and a short description
+are stored. Search results are deleted after 30 days, as the YouTube Developer Policies require.
+
+**Setup for search (optional, off by default):** set `"enabled": true` for `youtube_search` in
+`config/sources.json`, then in [Google Cloud Console](https://console.cloud.google.com/) create a project, enable
+**YouTube Data API v3**, create an **API key** (restrict it to that API), then set `VCD_YOUTUBE_API_KEY` in `.env`
+or the `YOUTUBE_API_KEY` repository secret. No billing account is needed.
+
+### Map locations
+`geocode` looks up the city each company record states (discovered companies: the city from SEC filings or
+Wikidata; StartupDB companies: their listed location) on [OpenStreetMap Nominatim](https://nominatim.org/) and writes
+`places.json` for the website's **Map** tab. Nothing is guessed: a company without a stated city, or whose location
+only names a state or country, is not placed. Each place is looked up once and cached in the `geocode_cache` table
+(places not found are retried after 90 days); new lookups are capped at 60 per run, one per second, as Nominatim's
+usage policy requires. Pins mark the city, not a street address. Locations © OpenStreetMap contributors (ODbL).
+
+The map itself uses [Leaflet](https://leafletjs.com/) and Leaflet.markercluster, bundled in
+`vc-investment-tracker-web/public/vendor/leaflet/` (BSD-2 and MIT licences included), with OpenStreetMap tiles.
 
 ### Data-confidence score (0–100)
 Identity (website, SEC CIK) + best source type + independent publishers + freshness + key fields filled −
@@ -241,4 +299,4 @@ the API, CSV round-trips, and the website data export.
 - Company websites are only known from Hacker News links, CSV or manual edits; news headlines don't include them.
 - Form D matching to news companies uses exact names; anything fuzzy goes to manual review.
 - The market factor is a proxy for investor activity, not a market-size estimate.
-- Not yet: GDELT, SBIR/USAspending grants, Reddit, Product Hunt, investor-relationship maps (Phases 2–4).
+- Not yet: GDELT, SBIR/USAspending grants, Product Hunt, investor-relationship maps (Phases 2–4).

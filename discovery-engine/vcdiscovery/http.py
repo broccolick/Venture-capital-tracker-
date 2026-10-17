@@ -46,12 +46,20 @@ class PoliteClient:
         self, url: str, params: dict | None = None, headers: dict | None = None, ok_statuses: tuple[int, ...] = ()
     ) -> httpx.Response:
         """GET with retries. Statuses in `ok_statuses` (e.g. 404) are returned instead of raised."""
+        return self._request("GET", url, params=params, headers=headers, ok_statuses=ok_statuses)
+
+    def post(self, url: str, data: dict | None = None, headers: dict | None = None,
+             auth: tuple[str, str] | None = None, json: dict | None = None) -> httpx.Response:
+        """POST with the same politeness and retry rules (OAuth token requests, GitHub GraphQL)."""
+        return self._request("POST", url, data=data, headers=headers, auth=auth, json=json)
+
+    def _request(self, method: str, url: str, ok_statuses: tuple[int, ...] = (), **kwargs) -> httpx.Response:
         host = urlsplit(url).hostname or ""
         last_error: str = ""
         for attempt in range(self.max_retries + 1):
             self._wait_turn(host)
             try:
-                resp = self._client.get(url, params=params, headers=headers)
+                resp = self._client.request(method, url, **{k: v for k, v in kwargs.items() if v is not None})
             except httpx.HTTPError as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
                 self._sleep(min(2 ** attempt, 30))
@@ -70,6 +78,10 @@ class PoliteClient:
                 raise SourceUnavailable(f"{url} returned HTTP {resp.status_code}")
             return resp
         raise SourceUnavailable(f"{url} unavailable after {self.max_retries + 1} attempts ({last_error})")
+
+    def pause(self, seconds: float) -> None:
+        """Wait when a source asks us to (for example Wikidata's maxlag)."""
+        self._sleep(seconds)
 
     def close(self) -> None:
         self._client.close()

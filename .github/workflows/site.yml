@@ -5,6 +5,13 @@
 #   1. Settings -> Pages -> Build and deployment -> Source: "GitHub Actions"
 #   2. Settings -> Secrets and variables -> Actions -> New repository secret
 #      Name: VCD_SEC_USER_AGENT   Value: Your Name your.email@example.com   (needed for SEC Form D data)
+#   3. Optional, for Reddit: secrets REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME
+#      (from a "script" app at https://www.reddit.com/prefs/apps). Reddit is skipped until they exist.
+#
+# Hall of contributors: adding the `hall-approved` label to a "Join the hall" issue republishes the site
+# with that contributor's portrait (see CONTRIBUTING.md).
+#   4. Optional, for YouTube search: secret YOUTUBE_API_KEY (free key from Google Cloud with the
+#      "YouTube Data API v3" enabled). The YouTube channel feeds need no key.
 #
 # The database is kept between runs on the `discovery-data` branch (one commit, replaced each day).
 name: Update data and publish site
@@ -16,11 +23,8 @@ on:
   push:
     branches: [main]
     paths: ["vc-investment-tracker-web/**", "discovery-engine/**", ".github/workflows/site.yml"]
-
-permissions:
-  contents: write   # save the database to the discovery-data branch
-  pages: write
-  id-token: write
+  issues:                   # Hall of contributors: republish when a "Join the hall" request is approved or changes
+    types: [labeled, unlabeled, edited, closed, reopened, deleted]
 
 concurrency:
   group: site
@@ -30,8 +34,14 @@ jobs:
   update:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write
+      issues: write
+    # Issue events only matter for approved Hall of contributors requests.
+    if: github.event_name != 'issues' || github.event.label.name == 'hall-approved' || contains(github.event.issue.labels.*.name, 'hall-approved')
     env:
-      COLLECT: ${{ github.event_name != 'push' }}   # a code push only republishes; it does not collect new data
+      # Only the daily schedule and "Run workflow" collect new data; code pushes and hall approvals just republish.
+      COLLECT: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     steps:
       - uses: actions/checkout@v5
 
@@ -63,14 +73,24 @@ jobs:
           (cd discovery-engine && python -m pytest)
           (cd vc-investment-tracker-web && node --test && npm run check)
 
-      - name: Discover startups (news, Hacker News, SEC Form D)
+      - name: Discover startups (news, Hacker News, YouTube, SEC Form D)
         if: env.COLLECT == 'true'
         working-directory: discovery-engine
         env:
           VCD_SEC_USER_AGENT: ${{ secrets.VCD_SEC_USER_AGENT }}
+          VCD_REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          VCD_REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          VCD_REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
+          VCD_YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: |
           python -m vcdiscovery.cli init-db
           python -m vcdiscovery.cli run
+
+      - name: Fill missing company facts from Wikidata
+        if: env.COLLECT == 'true'
+        working-directory: discovery-engine
+        run: |
+          python -m vcdiscovery.cli enrich
           python -m vcdiscovery.cli refresh-scores
 
       - name: Refresh StartupDB funding records
@@ -80,10 +100,29 @@ jobs:
 
       - name: Write website data files
         working-directory: discovery-engine
+        env:
+          VCD_SEC_USER_AGENT: ${{ secrets.VCD_SEC_USER_AGENT }}
+          VCD_REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          VCD_REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          VCD_REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
         run: |
           python -m vcdiscovery.cli init-db
           python -m vcdiscovery.cli export-site
           python -m vcdiscovery.cli status
+
+      - name: Map locations (company cities on OpenStreetMap)
+        working-directory: discovery-engine
+        # New lookups only on data runs, whose database (and lookup cache) is saved; other runs reuse the cache.
+        run: python -m vcdiscovery.cli geocode --max-new ${{ env.COLLECT == 'true' && 60 || 0 }}
+
+      - name: Hall of contributors (approved "Join the hall" requests)
+        working-directory: discovery-engine
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create hall-approved --color C9A227 --description "Approved for the Hall of contributors" 2>/dev/null || true
+          python -m vcdiscovery.cli export-hall
 
       - name: Save data for the next run
         if: env.COLLECT == 'true'
@@ -112,6 +151,9 @@ jobs:
   deploy:
     needs: update
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

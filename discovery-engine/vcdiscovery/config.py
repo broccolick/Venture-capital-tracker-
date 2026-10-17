@@ -29,7 +29,9 @@ class Settings(BaseSettings):
     # "Your Name your.email@example.com". The SEC source is skipped until this is set.
     sec_user_agent: str = ""
     # Generic identifier sent to every other website.
-    http_user_agent: str = "VCDiscoveryEngine/0.1 (personal research project)"
+    http_user_agent: str = (
+        "VCDiscoveryEngine/0.1 (open-source startup research; https://github.com/BagofRamen27/Venture-capital-tracker-)"
+    )
     http_timeout_seconds: float = 20.0
     http_min_interval_seconds: float = 1.0  # minimum pause between calls to the same website
     sec_min_interval_seconds: float = 0.25  # SEC allows up to 10 requests/second; we stay well below
@@ -38,7 +40,8 @@ class Settings(BaseSettings):
     scoring_file: str = "config/scoring.json"
 
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
-    # Optional shared secret. When set, every write request needs the header `X-API-Key`.
+    # Required to enable write endpoints; every write request must provide `X-API-Key`.
+    # An empty value disables writes (write routes fail closed).
     api_token: str = ""
 
     enable_scheduler: bool = False
@@ -48,8 +51,22 @@ class Settings(BaseSettings):
     sec_max_filings_per_run: int = 150
     stale_after_days: int = 180
     job_lock_minutes: int = 60
+    wikidata_max_lookups: int = 60  # companies looked up per run (about 2-3 requests each)
 
-    @field_validator("sec_user_agent", "http_user_agent", mode="before")
+    # Reddit Data API (register a "script" app at https://www.reddit.com/prefs/apps). Left empty = Reddit is skipped.
+    reddit_client_id: str = ""
+    reddit_client_secret: str = ""
+    reddit_username: str = ""
+    reddit_min_score: int = 5
+    reddit_posts_per_subreddit: int = 50
+
+    # YouTube Data API v3 key (free, from Google Cloud). Left empty = YouTube search is skipped;
+    # the publisher channel feeds in config/sources.json need no key.
+    youtube_api_key: str = ""
+    youtube_lookback_hours: int = 48
+    youtube_results_per_query: int = 25
+
+    @field_validator("sec_user_agent", "http_user_agent", "youtube_api_key", mode="before")
     @classmethod
     def _clean_header(cls, value):
         """Pasted values often carry line breaks, tabs or accented letters, which are not allowed in an

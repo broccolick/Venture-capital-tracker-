@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from .. import __version__
@@ -40,9 +41,21 @@ from ..pipeline import add_citation, latest_success, link_filing, run_discovery
 from ..resolution import merge_startups
 from ..scheduler import build_scheduler, describe, run_score_refresh
 from ..scoring import FACTORS, METHODS, load_config, save_weights, score_startup
-from ..sources import load_source_configs
+from ..sources import configuration_problem, load_source_configs
 from ..text import company_domain, normalize_company_name
 from . import serializers as ser
+
+
+def database_backend(url: str | None) -> str:
+    """Return only the database dialect (e.g. 'sqlite', 'postgresql') without credentials or location."""
+    if not url:
+        return "unknown"
+    try:
+        backend = make_url(url).get_backend_name()
+        return backend or "unknown"
+    except Exception:
+        # Never return any substring of a malformed URL that could leak credentials or paths
+        return "unknown"
 
 
 # ----------------------------------------------------------------- request bodies
@@ -124,7 +137,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_methods=["*"], allow_headers=["*"])
 
     def require_token(x_api_key: str | None = Header(default=None)) -> None:
-        if settings.api_token and x_api_key != settings.api_token:
+        if not settings.api_token:
+            raise HTTPException(503, "Write API disabled: configure VCD_API_TOKEN")
+        if x_api_key != settings.api_token:
             raise HTTPException(401, "Missing or wrong X-API-Key header")
 
     write = [Depends(require_token)]
@@ -142,7 +157,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health", tags=["system"])
     def health(session: Session = Depends(get_db)):
-        return {"status": "ok", "version": __version__, "database": settings.resolved_database_url.split("///")[0],
+        return {"status": "ok", "version": __version__, "database": database_backend(settings.resolved_database_url),
                 "startups": session.scalar(select(func.count(Startup.id))), "time": utcnow().isoformat()}
 
     @app.get("/api/reference", tags=["system"])
@@ -419,7 +434,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             health = "never_run" if not last else ("ok" if last.status in ("success", "partial") else last.status)
             if not cfg.get("enabled"):
                 health = "disabled"
-            elif cfg["type"] == "sec_form_d" and "@" not in settings.sec_user_agent:
+            elif configuration_problem(cfg, settings):
                 health = "needs_configuration"
             out.append({"key": cfg["key"], "name": cfg["name"], "group": cfg["group"], "enabled": cfg.get("enabled", False),
                         "health": health, "last_success": ser.iso(last_ok.get(cfg["key"])),
@@ -450,7 +465,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/import/startups", tags=["import/export"], dependencies=write)
     async def import_startups(file: UploadFile = File(...), session: Session = Depends(get_db)):
-        content = (await file.read()).decode("utf-8-sig")
+        max_upload_bytes = 2 * 1024 * 1024
+        content_bytes = await file.read(max_upload_bytes + 1)
+        if len(content_bytes) > max_upload_bytes:
+            raise HTTPException(413, "CSV upload exceeds 2 MiB limit")
+        try:
+            content = content_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(400, "CSV upload must be UTF-8 encoded") from exc
         result = import_startups_csv(session, content)
         session.commit()
         return result

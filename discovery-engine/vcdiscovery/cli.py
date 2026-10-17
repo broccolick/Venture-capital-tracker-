@@ -37,6 +37,20 @@ def cmd_run(args):
         print("No sources ran. Check config/sources.json and your .env file.")
 
 
+def cmd_enrich(args):
+    from .pipeline import make_client
+    from .wikidata import run_enrichment
+
+    settings = _setup()
+    client = make_client(settings)
+    try:
+        result = run_enrichment(settings, client, limit=args.limit)
+    finally:
+        client.close()
+    print(f"  wikidata  {result['status']}  checked={result.get('checked', 0)} matched={result.get('matched', 0)} "
+          f"fields_filled={result.get('fields_filled', 0)}" + (f"  ERROR: {result['error']}" if result.get("error") else ""))
+
+
 def cmd_check_sources(args):
     """Fetch each source once (nothing is saved) to confirm it is reachable and returns data."""
     from .http import SourceUnavailable
@@ -136,6 +150,35 @@ def cmd_export_site(args):
             print(f"Wrote {path}")
 
 
+def cmd_export_hall(args):
+    import os
+
+    from .hall import export_hall
+    from .pipeline import make_client
+
+    token, repo = os.environ.get("GITHUB_TOKEN", ""), os.environ.get("GITHUB_REPOSITORY", "")
+    if not token or "/" not in repo:
+        print("Hall of contributors: GITHUB_TOKEN and GITHUB_REPOSITORY are not set; skipped.")
+        return
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER") or repo.split("/")[0]
+    try:
+        entries = export_hall(make_client(get_settings()), token, repo, owner, args.directory)
+    except Exception as exc:  # the site still builds; the hall shows the people listed in contributors.json
+        print(f"::warning::Hall of contributors not updated: {exc}")
+        return
+    print(f"Hall of contributors: {len(entries)} approved portrait(s) written to {args.directory}")
+
+
+def cmd_geocode(args):
+    from .geocode import write_places
+    from .pipeline import make_client
+
+    settings = _setup()
+    with session_scope() as session:
+        data = write_places(session, make_client(settings), args.market, args.out, args.max_new)
+    print(f"Map: {len(data['discovery'])} discovered and {len(data['market'])} StartupDB companies placed; wrote {args.out}")
+
+
 def cmd_print_schema(_args):
     from sqlalchemy.dialects import postgresql, sqlite
     from sqlalchemy.schema import CreateIndex, CreateTable
@@ -175,6 +218,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--source", action="append", help="Source key (repeatable). Default: all enabled")
     p.add_argument("--group", action="append", help="news | funding | community | regulatory (repeatable)")
     p.set_defaults(func=cmd_run)
+    p = sub.add_parser("enrich", help="Fill missing company facts from Wikidata")
+    p.add_argument("--limit", type=int, default=None, help="Companies to look up (default: VCD_WIKIDATA_MAX_LOOKUPS)")
+    p.set_defaults(func=cmd_enrich)
     p = sub.add_parser("check-sources", help="Test that each source is reachable (saves nothing)")
     p.add_argument("--include-disabled", action="store_true")
     p.set_defaults(func=cmd_check_sources)
@@ -197,6 +243,14 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("export-site", help="Write the website's data files (discovery.json, news.json, status.json)")
     p.add_argument("directory", nargs="?", default=str(BASE_DIR.parent / "vc-investment-tracker-web" / "public" / "data"))
     p.set_defaults(func=cmd_export_site)
+    p = sub.add_parser("export-hall", help="Write approved 'Join the hall' GitHub issues for the Hall of contributors")
+    p.add_argument("directory", nargs="?", default=str(BASE_DIR.parent / "vc-investment-tracker-web" / "public" / "contributors"))
+    p.set_defaults(func=cmd_export_hall)
+    p = sub.add_parser("geocode", help="Look up company cities on OpenStreetMap and write the map's places.json")
+    p.add_argument("--market", default=str(BASE_DIR.parent / "vc-investment-tracker-web" / "public" / "data" / "market.json"), help="StartupDB data file (optional)")
+    p.add_argument("--out", default=str(BASE_DIR.parent / "vc-investment-tracker-web" / "public" / "data" / "places.json"))
+    p.add_argument("--max-new", type=int, default=60, help="new lookups per run (Nominatim: 1 per second)")
+    p.set_defaults(func=cmd_geocode)
     p = sub.add_parser("print-schema", help="Print the SQL schema")
     p.add_argument("--postgres", action="store_true")
     p.set_defaults(func=cmd_print_schema)
