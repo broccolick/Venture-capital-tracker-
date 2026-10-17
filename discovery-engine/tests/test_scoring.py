@@ -5,7 +5,8 @@ from sqlalchemy import select
 
 from tests.test_pipeline import ingest, news
 from vcdiscovery import db
-from vcdiscovery.models import ScoreOverride, Startup, utcnow
+from vcdiscovery.models import Citation, NewsArticle, ScoreOverride, SourceObservation, Startup, utcnow
+from vcdiscovery.confidence import compute_confidence
 from vcdiscovery.scoring import load_config, save_weights, score_startup, validate_weights
 
 
@@ -78,3 +79,76 @@ def test_invalid_weights_rejected():
         validate_weights({"market_opportunity": 50})
     with pytest.raises(ValueError, match="Unknown"):
         validate_weights({"vibes": 100})
+
+
+
+def test_confidence_does_not_combine_sources_about_different_fields(settings):
+    with db.session_scope() as s:
+        startup = Startup(name="Evidence Test Co", normalized_name="evidence test co",
+                          review_status="Needs Verification", flags=[], is_demo=False)
+        s.add(startup)
+        s.flush()
+        for index, (field_name, value, origin) in enumerate([
+            ("industry", "Robotics", "publisher-a"),
+            ("founders", "Jane Example", "publisher-b"),
+        ], start=1):
+            article = NewsArticle(
+                source_key=f"news-{index}", source_type="news", publisher=f"Outlet {index}",
+                url=f"https://evidence{index}.example/story", title=f"Evidence item {index}",
+                title_fingerprint=f"{index:064x}", community_metrics=None,
+            )
+            s.add(article)
+            s.flush()
+            observation = SourceObservation(
+                article_id=article.id, revision_number=1, source_key=article.source_key,
+                source_type=article.source_type, publisher=article.publisher, source_url=article.url,
+                title=article.title, summary=None, published_at=None, fingerprint=f"{index:064x}",
+                origin_group=origin, source_role="independent_reporter",
+            )
+            s.add(observation)
+            s.flush()
+            s.add(Citation(
+                startup_id=startup.id, field_name=field_name, value_text=value,
+                evidence_status="reported", is_estimate=False, source_type="news",
+                publisher=article.publisher, source_url=article.url, article_id=article.id,
+                source_observation_id=observation.id, is_current=True,
+                dedupe_key=f"{startup.id}:{field_name}:{index}",
+            ))
+        result = compute_confidence(s, startup)
+        corroboration = next(p for p in result["components"] if p["component"] == "corroboration")
+        assert corroboration["points"] == 0
+        assert "same field/value" in corroboration["explanation"]
+
+
+def test_confidence_rewards_multiple_origins_supporting_same_field_value(settings):
+    with db.session_scope() as s:
+        startup = Startup(name="Claim Test Co", normalized_name="claim test co",
+                          review_status="Needs Verification", flags=[], is_demo=False)
+        s.add(startup)
+        s.flush()
+        for index, origin in enumerate(("outlet-a", "outlet-b"), start=1):
+            article = NewsArticle(
+                source_key=f"claim-news-{index}", source_type="news", publisher=f"Outlet {index}",
+                url=f"https://claim{index}.example/story", title="Claim evidence",
+                title_fingerprint=f"{index:064x}", community_metrics=None,
+            )
+            s.add(article)
+            s.flush()
+            observation = SourceObservation(
+                article_id=article.id, revision_number=1, source_key=article.source_key,
+                source_type=article.source_type, publisher=article.publisher, source_url=article.url,
+                title=article.title, summary=None, published_at=None, fingerprint=f"{index:064x}",
+                origin_group=origin, source_role="independent_reporter",
+            )
+            s.add(observation)
+            s.flush()
+            s.add(Citation(
+                startup_id=startup.id, field_name="industry", value_text="Robotics",
+                evidence_status="reported", is_estimate=False, source_type="news",
+                publisher=article.publisher, source_url=article.url, article_id=article.id,
+                source_observation_id=observation.id, is_current=True,
+                dedupe_key=f"{startup.id}:industry:{index}",
+            ))
+        result = compute_confidence(s, startup)
+        corroboration = next(p for p in result["components"] if p["component"] == "corroboration")
+        assert corroboration["points"] == 14
