@@ -16,7 +16,7 @@ from .confidence import compute_confidence
 from .config import Settings
 from .db import session_scope
 from .extraction import extract_funding, extract_hn
-from .funding import record_round, refresh_funding_summary
+from .funding import record_round, refresh_funding_summary, supersede_source_revision
 from .http import PoliteClient
 from .models import (
     ArticleMention,
@@ -229,12 +229,14 @@ def ingest_news_item(session: Session, item: NewsItem, settings: Settings, match
             stats["duplicate"] = 1
             return stats
 
-        _record_source_observation(
+        revision_observation = _record_source_observation(
             session, article, source_key=item.source_key, source_type=item.source_type, publisher=item.publisher,
             source_url=url, title=item.title, summary=item.summary, published_at=item.published_at,
             retrieved_at=now, fingerprint=fingerprint, revision_number=previous.revision_number + 1,
             origin_group=item.origin_group, source_role=item.source_role,
         )
+        # Funding claims from the older source version are no longer current, but remain in history.
+        supersede_source_revision(session, article.id, revision_observation.id)
         # Preserve old rows for audit but remove them from the current profile view.
         for citation in session.scalars(select(Citation).where(
                 Citation.article_id == article.id, Citation.is_current.is_(True))):
@@ -348,6 +350,7 @@ def _ingest_funding_news(session, item: NewsItem, article: NewsArticle, stats, t
     # explicitly labelled proxy when present; never substitute retrieval/current time.
     announced = item.published_at.date() if item.published_at else None
     announced_date_basis = "publication_date_proxy" if item.published_at else "unknown"
+    source_observation = _observation_for_article(session, article)
     rnd, outcome = record_round(
         session, startup, round_type=ext.round_type, amount=ext.amount, currency=ext.currency,
         amount_text=ext.amount_text, announced=announced, evidence_status=ext.evidence_status,
@@ -355,6 +358,8 @@ def _ingest_funding_news(session, item: NewsItem, article: NewsArticle, stats, t
         investors=ext.investors, leads=ext.lead_investors,
         announced_date_basis=announced_date_basis,
         source_published_at=item.published_at.isoformat() if item.published_at else None,
+        source_observation_id=source_observation.id if source_observation else None,
+        origin_group=item.origin_group, source_role=item.source_role,
     )
     value = " ".join(p for p in (ext.round_type, ext.amount_text) if p) or "Funding mentioned"
     add_citation(session, startup, "funding_round", value, ext.evidence_status, key=f"a{article.id}",
@@ -523,6 +528,10 @@ def _state_code(value: str) -> str:
 
 
 def _apply_filing(session: Session, startup: Startup, filing: SecFiling, executives: list[str]) -> None:
+    filed = filing.filing_date
+    published_at = datetime.combine(filed, datetime.min.time()) if filed else None
+    mapped_industry = INDUSTRY_LABELS.get(filing.industry_group or "")
+
     if not startup.legal_name:
         startup.legal_name = filing.issuer_name
     startup.sec_cik = startup.sec_cik or filing.cik
@@ -532,37 +541,115 @@ def _apply_filing(session: Session, startup: Startup, filing: SecFiling, executi
         startup.founded_year = filing.year_of_incorporation
     if not startup.hq_state and filing.state_or_country:
         startup.hq_state, startup.hq_city = filing.state_or_country, startup.hq_city or (filing.city or "").title() or None
+    if not startup.industry and mapped_industry:
+        startup.industry = mapped_industry
+
+    # Preserve field-level provenance for Form D enrichment. Year of incorporation and the
+    # broad industry-group mapping are proxies, not definitive claims about founding year/industry.
+    citation_fields = [
+        ("legal_name", startup.legal_name if startup.legal_name == filing.issuer_name else None, False,
+         "Legal name as listed on SEC Form D."),
+        ("sec_cik", startup.sec_cik if startup.sec_cik == filing.cik else None, False,
+         "SEC Central Index Key associated with this filing."),
+        ("founded_year", startup.founded_year if filing.year_of_incorporation and startup.founded_year == filing.year_of_incorporation else None,
+         True, "Year of incorporation on Form D used as an age proxy; it is not necessarily the business founding year."),
+        ("hq_city", startup.hq_city if filing.city and startup.hq_city == filing.city.title() else None, False,
+         "City as reported on SEC Form D."),
+        ("hq_state", startup.hq_state if filing.state_or_country and startup.hq_state == filing.state_or_country else None, False,
+         "State or country field as reported on SEC Form D."),
+        ("industry", startup.industry if mapped_industry and startup.industry == mapped_industry else None, True,
+         f"Broad industry inferred from SEC industry group '{filing.industry_group or 'unknown'}'."),
+    ]
+    for field_name, value, is_estimate, note in citation_fields:
+        if value is not None:
+            add_citation(
+                session, startup, field_name, str(value), "regulatory_filing",
+                key=filing.accession_number, source_type="regulatory", publisher="SEC EDGAR",
+                url=filing.filing_url, filing=filing, published_at=published_at,
+                is_estimate=is_estimate, note=note,
+            )
 
     sold = filing.total_amount_sold
     offered = "Indefinite" if filing.offering_amount_indefinite else (
         f"${filing.total_offering_amount:,.0f}" if filing.total_offering_amount is not None else "not stated")
     summary = f"Form {filing.form_type}: ${sold or 0:,.0f} sold of {offered} offered"
-    filed = filing.filing_date or utcnow().date()
-    if sold:
+
+    if sold is not None:
         existing = None
         if filing.is_amendment:
             existing = session.scalar(select(FundingRound).where(
-                FundingRound.startup_id == startup.id, FundingRound.evidence_status == "regulatory_filing"
+                FundingRound.startup_id == startup.id,
+                FundingRound.evidence_status == "regulatory_filing",
+                FundingRound.is_current.is_(True),
             ).order_by(FundingRound.announced_date.desc()))
         if existing:
+            previous_filing_id = existing.sec_filing_id
+            extra = dict(existing.extra or {})
+            observations = list(extra.get("funding_observations") or [])
+            if previous_filing_id is not None and not any(
+                    o.get("sec_filing_id") == previous_filing_id for o in observations):
+                old_filing = session.get(SecFiling, previous_filing_id)
+                old_date = old_filing.filing_date if old_filing else existing.announced_date
+                observations.append({
+                    "article_id": None, "source_observation_id": None, "sec_filing_id": previous_filing_id,
+                    "source_url": old_filing.filing_url if old_filing else existing.source_url,
+                    "publisher": "SEC EDGAR", "origin_group": "sec-edgar", "source_role": "regulator",
+                    "round_type": existing.round_type, "amount": existing.amount, "currency": existing.currency,
+                    "amount_text": existing.amount_text,
+                    "announced_date": existing.announced_date.isoformat() if existing.announced_date else None,
+                    "announced_date_basis": "filing_date",
+                    "source_published_at": old_date.isoformat() if old_date else None,
+                    "evidence_status": "regulatory_filing", "outcome": "legacy_baseline",
+                    "match_reason": "Prior Form D value before amendment; offering notice does not prove a completed priced round",
+                    "independent_source": False, "is_current": True,
+                })
+            for observation in observations:
+                if observation.get("sec_filing_id") == previous_filing_id and observation.get("is_current", True):
+                    observation["is_current"] = False
+                    observation["superseded_by_sec_filing_id"] = filing.accession_number
+            observations.append({
+                "article_id": None, "source_observation_id": None, "sec_filing_id": filing.id,
+                "source_url": filing.filing_url, "publisher": "SEC EDGAR",
+                "origin_group": "sec-edgar", "source_role": "regulator",
+                "round_type": existing.round_type, "amount": sold, "currency": "USD", "amount_text": summary,
+                "announced_date": existing.announced_date.isoformat() if existing.announced_date else None,
+                "announced_date_basis": "filing_date",
+                "source_published_at": filed.isoformat() if filed else None,
+                "evidence_status": "regulatory_filing", "outcome": "amended",
+                "match_reason": f"Updated by Form D/A accession {filing.accession_number}; filing date is not the funding-event date",
+                "independent_source": False, "is_current": True,
+            })
+            extra["funding_observations"] = observations
+            extra["announced_date_basis"] = extra.get("announced_date_basis") or "filing_date"
+            existing.extra = extra
+            old_amount = existing.amount
             existing.notes = ((existing.notes + "; ") if existing.notes else "") + (
-                f"Amended by {filing.accession_number} on {filed}: amount sold {existing.amount or 0:,.0f} -> {sold:,.0f}")
+                f"Amended by {filing.accession_number}: amount sold {old_amount or 0:,.0f} -> {sold:,.0f}")
             existing.amount, existing.amount_text, existing.sec_filing_id = sold, summary, filing.id
             existing.source_url = filing.filing_url
+            existing.is_current = True
+            existing.superseded_by_round_id = None
         else:
-            record_round(session, startup, round_type=None, amount=sold, currency="USD", amount_text=summary,
-                         announced=filed, evidence_status="regulatory_filing", publisher="SEC EDGAR",
-                         source_url=filing.filing_url, sec_filing_id=filing.id)
+            record_round(
+                session, startup, round_type=None, amount=sold, currency="USD", amount_text=summary,
+                announced=filed, evidence_status="regulatory_filing", publisher="SEC EDGAR",
+                source_url=filing.filing_url, sec_filing_id=filing.id,
+                announced_date_basis="filing_date", source_published_at=filed.isoformat() if filed else None,
+                origin_group="sec-edgar", source_role="regulator",
+            )
+
     _add_signal(session, startup, "regulatory_filing", f"formd:{filing.accession_number}", source_key="sec_form_d",
-                detail=summary, url=filing.filing_url, observed_at=datetime.combine(filed, datetime.min.time()), filing=filing)
+                detail=summary, url=filing.filing_url, observed_at=published_at, filing=filing)
     add_citation(session, startup, "sec_form_d", summary, "regulatory_filing", key=filing.accession_number,
                   source_type="regulatory", publisher="SEC EDGAR", url=filing.filing_url, filing=filing,
-                  published_at=datetime.combine(filed, datetime.min.time()),
+                  published_at=published_at,
                   note="Form D is an offering notice; it does not confirm a priced round, valuation or investor identity")
     if executives:
         add_citation(session, startup, "key_people", ", ".join(executives), "regulatory_filing",
                       key=filing.accession_number, source_type="regulatory", publisher="SEC EDGAR",
-                      url=filing.filing_url, filing=filing, note="Executive officers listed on Form D (not necessarily founders)")
+                      url=filing.filing_url, filing=filing, published_at=published_at,
+                      note="Executive officers listed on Form D (not necessarily founders)")
+    refresh_funding_summary(startup)
 
 
 def link_filing(session: Session, filing: SecFiling, startup: Startup, actor: str = "analyst") -> None:
