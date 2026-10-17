@@ -82,11 +82,13 @@ def release_lock(session: Session, name: str) -> None:
 def _source_fingerprint(
     source_key: str, source_type: str, publisher: str | None, source_url: str,
     title: str, summary: str | None, published_at: datetime | None,
+    origin_group: str | None = None, source_role: str | None = None,
 ) -> str:
     """Fingerprint source metadata relevant to extracting or interpreting a claim."""
     parts = (
         source_key or "", source_type or "", publisher or "", source_url or "",
         title or "", summary or "", published_at.isoformat() if published_at else "",
+        origin_group or "", source_role or "",
     )
     return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
@@ -95,12 +97,13 @@ def _record_source_observation(
     session: Session, article: NewsArticle, *, source_key: str, source_type: str,
     publisher: str | None, source_url: str, title: str, summary: str | None,
     published_at: datetime | None, retrieved_at: datetime, fingerprint: str,
-    revision_number: int,
+    revision_number: int, origin_group: str | None = None, source_role: str | None = None,
 ) -> SourceObservation:
     observation = SourceObservation(
         article_id=article.id, revision_number=revision_number, source_key=source_key,
         source_type=source_type, publisher=publisher, source_url=source_url, title=title,
         summary=summary, published_at=published_at, retrieved_at=retrieved_at, fingerprint=fingerprint,
+        origin_group=origin_group, source_role=source_role,
     )
     session.add(observation)
     session.flush()
@@ -203,6 +206,7 @@ def ingest_news_item(session: Session, item: NewsItem, settings: Settings, match
     now = utcnow()
     fingerprint = _source_fingerprint(
         item.source_key, item.source_type, item.publisher, url, item.title, item.summary, item.published_at,
+        item.origin_group, item.source_role,
     )
     article = session.scalar(select(NewsArticle).where(NewsArticle.url == url))
     if article:
@@ -229,6 +233,7 @@ def ingest_news_item(session: Session, item: NewsItem, settings: Settings, match
             session, article, source_key=item.source_key, source_type=item.source_type, publisher=item.publisher,
             source_url=url, title=item.title, summary=item.summary, published_at=item.published_at,
             retrieved_at=now, fingerprint=fingerprint, revision_number=previous.revision_number + 1,
+            origin_group=item.origin_group, source_role=item.source_role,
         )
         # Preserve old rows for audit but remove them from the current profile view.
         for citation in session.scalars(select(Citation).where(
@@ -280,6 +285,7 @@ def ingest_news_item(session: Session, item: NewsItem, settings: Settings, match
             session, article, source_key=item.source_key, source_type=item.source_type, publisher=item.publisher,
             source_url=url, title=item.title, summary=item.summary, published_at=item.published_at,
             retrieved_at=now, fingerprint=fingerprint, revision_number=1,
+            origin_group=item.origin_group, source_role=item.source_role,
         )
         stats["new"] = 1
 

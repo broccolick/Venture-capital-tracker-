@@ -47,7 +47,8 @@ def build_sources(settings: Settings, keys: list[str] | None = None, groups: lis
             continue
         if kind == "rss":
             sources.append(RSSSource(key=key, name=cfg["name"], url=cfg["url"], publisher=cfg["publisher"],
-                                     group=cfg["group"], source_type=cfg.get("source_type", "news")))
+                                     group=cfg["group"], source_type=cfg.get("source_type", "news"),
+                                     origin_group=cfg.get("origin_group"), source_role=cfg.get("source_role")))
         elif kind == "hackernews":
             sources.append(HackerNewsSource(key=key, name=cfg["name"], lookback_hours=settings.hn_lookback_hours,
                                             min_points=settings.hn_min_points))
